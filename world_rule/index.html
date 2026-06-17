@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f1711" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=0.1.53" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=0.1.53" />
+    <link rel="shortcut icon" href="/favicon.ico?v=0.1.53" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=0.1.53" />
+    <link rel="manifest" href="/site.webmanifest?v=0.1.53" />
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta
+      name="description"
+      content="NiceChunk World Generation Algorithm: browse the seeded voxel world and inspect the public terrain, biome, water, cave, tree, and block generation rules."
+    />
+    <title data-wr-i18n="title">NiceChunk World Generation Algorithm</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand-mark" href="/" aria-label="NiceChunk">
+        <img src="/media/nck.png" alt="" />
+        <span>NICECHUNK</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary navigation" data-wr-i18n-aria-label="nav.aria">
+        <div class="nav-links">
+          <a href="/" data-wr-i18n="nav.home">Home</a>
+          <a href="/roadmap/" data-wr-i18n="nav.roadbook">Roadbook</a>
+          <a class="active" href="/world_rule/" data-wr-i18n="nav.worldRules">World Rules</a>
+          <a href="/resource_rule/" data-wr-i18n="nav.resources">Resources</a>
+          <a href="/elements/" data-wr-i18n="nav.elements">Elements</a>
+          <a href="/fairness/" data-wr-i18n="nav.fairness">Fairness</a>
+          <a href="/proof-of-frontier/" data-wr-i18n="nav.proofOfFrontier">Proof</a>
+          <a href="/guardian/" data-wr-i18n="nav.guardians">Guardians</a>
+          <a href="/docs/" data-wr-i18n="nav.docs">Docs</a>
+        </div>
+        <div class="nav-actions">
+          <a class="header-action" href="/play/" data-wr-i18n="nav.enterWorld">Enter World</a>
+          <div class="language-control">
+            <button id="languageTrigger" class="language-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span id="languageCurrent">English</span>
+              <span class="language-caret" aria-hidden="true"></span>
+            </button>
+            <div id="languageMenu" class="language-menu" role="listbox"></div>
+          </div>
+        </div>
+      </nav>
+    </header>
+    <div class="world-bg" aria-hidden="true">
+      <div class="world-bg-grid"></div>
+      <div class="world-bg-vignette"></div>
+    </div>
+
+    <main class="world-algorithm-layout">
+      <section class="preview-pane" aria-label="World preview" data-wr-i18n-aria-label="preview.label">
+        <canvas id="worldPreview"></canvas>
+        <div class="preview-shade" aria-hidden="true"></div>
+        <div class="preview-hud preview-hud-top">
+          <div>
+            <span class="hud-label" data-wr-i18n="preview.heading">WORLD PREVIEW</span>
+            <strong id="previewSeedLabel">nicechunk-mainnet-001</strong>
+          </div>
+          <span id="previewStats">0 chunks</span>
+        </div>
+        <div class="preview-hud preview-hud-bottom" aria-hidden="true">
+          <span data-wr-i18n="preview.fly">WASD Fly</span>
+          <span data-wr-i18n="preview.look">Mouse Drag Look</span>
+          <span data-wr-i18n="preview.vertical">Space / C Vertical</span>
+        </div>
+        <div class="preview-metrics" aria-label="Preview constants" data-wr-i18n-aria-label="preview.metricsLabel">
+          <span><b data-wr-i18n="metrics.chunkSizeLabel">Chunk</b><strong>16x16</strong></span>
+          <span><b data-wr-i18n="metrics.seaLevelLabel">Sea</b><strong>Y96</strong></span>
+          <span><b data-wr-i18n="metrics.renderRadiusLabel">Render</b><strong>R6</strong></span>
+        </div>
+      </section>
+
+      <aside class="algorithm-pane" aria-labelledby="pageTitle">
+        <div class="algorithm-scroll">
+          <header class="rule-header">
+            <p class="eyebrow" data-wr-i18n="header.eyebrow">PUBLIC GENERATION SPEC</p>
+            <h1 id="pageTitle" data-wr-i18n="header.title">World Generation Algorithm</h1>
+            <p class="header-copy" data-wr-i18n="header.body">
+              NiceChunk terrain is generated from a public seed pipeline. The same seed and coordinates produce the same
+              terrain profile, biome, water, caves, trees, and block query results.
+            </p>
+            <div class="status-strip" aria-label="World generation status" data-wr-i18n-aria-label="metrics.statusLabel">
+              <span data-wr-i18n="metrics.deterministic">Deterministic</span>
+              <span data-wr-i18n="metrics.inspectable">Inspectable</span>
+              <span data-wr-i18n="metrics.runtime">Runtime rules</span>
+            </div>
+          </header>
+
+          <section class="seed-panel" aria-label="Seed controls" data-wr-i18n-aria-label="seed.label">
+            <label class="seed-field" for="seedInput">
+              <span data-wr-i18n="seed.field">World Seed</span>
+              <input id="seedInput" type="text" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="seed-actions">
+              <button id="renderSeed" type="button" data-wr-i18n="seed.render">Render Seed</button>
+              <button id="randomSeed" type="button" data-wr-i18n="seed.random">Random Seed</button>
+            </div>
+          </section>
+
+          <section class="overview-grid" aria-label="Generation overview" data-wr-i18n-aria-label="overview.label">
+            <article>
+              <span>01</span>
+              <h2 data-wr-i18n="overview.seed.title">Seeded world state</h2>
+              <p data-wr-i18n="overview.seed.body">A text seed is hashed once, then mixed into every coordinate sample.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <h2 data-wr-i18n="overview.height.title">Heightfield first</h2>
+              <p data-wr-i18n="overview.height.body">Continents, oceans, relief, rivers, dunes, and mountains produce the base terrain.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <h2 data-wr-i18n="overview.biome.title">Climate and biome pass</h2>
+              <p data-wr-i18n="overview.biome.body">Temperature, humidity, slope, altitude, water, and special masks select the biome.</p>
+            </article>
+            <article>
+              <span>04</span>
+              <h2 data-wr-i18n="overview.block.title">Block query rules</h2>
+              <p data-wr-i18n="overview.block.body">The engine answers block requests from depth, fluid, cave, surface, and vegetation rules.</p>
+            </article>
+          </section>
+
+          <section class="pipeline-panel" aria-label="Generation pipeline" data-wr-i18n-aria-label="pipeline.label">
+            <div class="panel-heading">
+              <p class="eyebrow" data-wr-i18n="pipeline.eyebrow">GENERATION PIPELINE</p>
+              <h2 data-wr-i18n="pipeline.title">From seed to playable chunks</h2>
+            </div>
+            <ol class="pipeline-list" id="pipelineList"></ol>
+          </section>
+
+          <section class="biome-panel" aria-label="Biome priority" data-wr-i18n-aria-label="biomes.label">
+            <div class="panel-heading">
+              <p class="eyebrow" data-wr-i18n="biomes.eyebrow">BIOME PRIORITY</p>
+              <h2 data-wr-i18n="biomes.title">Water and extreme terrain win first</h2>
+            </div>
+            <div class="biome-strip" id="biomeStrip"></div>
+          </section>
+
+          <section class="rule-list" id="ruleList" aria-label="Generation rules" data-wr-i18n-aria-label="rules.label"></section>
+        </div>
+      </aside>
+    </main>
+
+    <script type="module" src="./world_rule.js"></script>
+  </body>
+</html>

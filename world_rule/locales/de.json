@@ -1,0 +1,319 @@
+{
+  "title": "NiceChunk Weltgenerierungsalgorithmus",
+  "nav": {
+    "aria": "Primäre Navigation",
+    "home": "Startseite",
+    "roadbook": "Roadbook",
+    "worldRules": "Weltregeln",
+    "resources": "Ressourcen",
+    "elements": "Elemente",
+    "fairness": "Fairness",
+    "proofOfFrontier": "Beweis",
+    "docs": "Dokumente",
+    "enterWorld": "Betritt die Welt",
+    "guardians": "Wächter"
+  },
+  "preview": {
+    "label": "Weltvorschau",
+    "heading": "WELTVORSCHAU",
+    "fly": "WASD Fly",
+    "look": "Maus-Drag-Look",
+    "vertical": "Leerzeichen / C Vertikal",
+    "chunks": "{active}/{total} chunks",
+    "metricsLabel": "Vorschau der Konstanten"
+  },
+  "header": {
+    "eyebrow": "ÖFFENTLICHE ERZEUGUNG SPEZ",
+    "title": "Weltgenerierungsalgorithmus",
+    "body": "NiceChunk-Terrain wird aus einer öffentlichen Seed-Pipeline generiert. Derselbe Startwert und dieselben Koordinaten erzeugen dasselbe Geländeprofil, dasselbe Biom, dasselbe Wasser, dieselben Höhlen, dieselben Bäume und dieselben Blockabfrageergebnisse.",
+    "enterWorld": "Betritt die Welt",
+    "language": "Englisch"
+  },
+  "metrics": {
+    "statusLabel": "Status der Weltgeneration",
+    "chunkSizeLabel": "Chunk",
+    "seaLevelLabel": "Meer",
+    "renderRadiusLabel": "Rendern",
+    "deterministic": "Deterministisch",
+    "inspectable": "Prüfbar",
+    "runtime": "Laufzeitregeln"
+  },
+  "seed": {
+    "label": "Saatgutkontrollen",
+    "field": "Weltsamen",
+    "render": "Render Seed",
+    "random": "Zufälliger Samen"
+  },
+  "overview": {
+    "label": "Generationenübersicht",
+    "seed": {
+      "title": "Gesäter Weltstaat",
+      "body": "Ein Text-Seed wird einmal gehasht und dann in jede Koordinatenprobe eingemischt."
+    },
+    "height": {
+      "title": "Heightfield zuerst",
+      "body": "Kontinente, Ozeane, Reliefs, Flüsse, Dünen und Berge bilden das Basisgelände."
+    },
+    "biome": {
+      "title": "Klima- und Biompass",
+      "body": "Temperatur, Luftfeuchtigkeit, Neigung, Höhe, Wasser und spezielle Masken wählen das Biom aus."
+    },
+    "block": {
+      "title": "Abfrageregeln blockieren",
+      "body": "Die Engine beantwortet Blockanfragen aus Tiefen-, Flüssigkeits-, Höhlen-, Oberflächen- und Vegetationsregeln."
+    }
+  },
+  "pipeline": {
+    "label": "Erzeugungspipeline",
+    "eyebrow": "ERZEUGUNGSPIPELINE",
+    "title": "Vom Startwert zum spielbaren chunks",
+    "steps": [
+      {
+        "title": "Hash-Seed",
+        "body": "Konvertieren Sie den sichtbaren Startwert in eine stabile Ganzzahl, die von allen Zufallsfunktionen verwendet wird."
+      },
+      {
+        "title": "Beispielfelder",
+        "body": "Lesen Sie Kontinentalität, Erosion, Seltsamkeit, Temperatur, Luftfeuchtigkeit, Vulkanismus und Korruptionsgeräusche."
+      },
+      {
+        "title": "Bauhöhe",
+        "body": "Kombinieren Sie Meeresbecken, Landschelfs, Tieflandreliefs, Flüsse, Dünen, Berge und Hanggrenzen."
+      },
+      {
+        "title": "Biom wählen",
+        "body": "Wenden Sie die geordnete Biompriorität an, damit Wasser-, Kälte-, Höhen-, Nässe-, Hitze- und Waldmasken konsistent aufgelöst werden."
+      },
+      {
+        "title": "Antwortblöcke",
+        "body": "Gelände, Flüssigkeit, Höhlen, Höhlenwände, Vegetation, Bäume und Dekorationen aus Koordinatenabfragen zurückgeben."
+      }
+    ]
+  },
+  "biomes": {
+    "label": "Biompriorität",
+    "eyebrow": "BIOM-PRIORITÄT",
+    "title": "Wasser und extremes Gelände gewinnen zuerst",
+    "items": [
+      "Ozean",
+      "Fluss",
+      "See",
+      "Strand",
+      "Vulkan",
+      "Schneefeld",
+      "Berg",
+      "Sumpf",
+      "Feuchtgebiet",
+      "Tundra",
+      "Wüste",
+      "Regenwald",
+      "Wald",
+      "Ebenen"
+    ]
+  },
+  "rules": {
+    "label": "Generierungsregeln",
+    "generationTitle": "ERZEUGUNGSPIPELINE",
+    "blockTitle": "BLOCK-, FLÜSSIGKEITS- UND DEKORATIONSREGELN",
+    "generation": [
+      {
+        "title": "Deterministischer Samen",
+        "code": "worldSeed = hashSeed(seed)\nrandom2(x, z) = hash(x, z, worldSeed)\ncache.clear() when seed changes",
+        "description": "Der Startwert wird auf eine stabile Ganzzahl reduziert und in jede Zufallsstichprobe eingemischt. Geländehöhe, Klima, Wasser, Bäume, Höhlen und Materialrollen sind für denselben Samen und dieselben Koordinaten deterministisch."
+      },
+      {
+        "title": "Lärm-Toolkit",
+        "code": "valueNoise = smoothed grid random\nfbm = layered valueNoise\nridgeNoise = 1 - abs(valueNoise)\nsmoothstep = soft threshold",
+        "description": "Der Generator besteht aus einfachen Seed-Noise-Primitiven. FBM erzeugt eine breite Variation, Ridge Noise erzeugt Bänder und Kanäle und Smoothstep wandelt verrauschte Werte in weiche Biom- und Feature-Masken um."
+      },
+      {
+        "title": "Spaltenprofil",
+        "code": "profile(x, z):\n  groundHeight = rawTerrainHeight(x, z)\n  slope = max(neighbor height delta)\n  sample = climate + erosion + weirdness + volcanic + corruption\n  biome = chooseBiome(...)\n  terrain/fluid/vegetation = surface rules",
+        "description": "Jede Weltspalte wird in einem Geländeprofil zusammengefasst. Rendering, Kollision, Minikartenfarbe, Bäume und Wasser werden alle aus demselben Profil gelesen, sodass auf der Seite der tatsächliche Laufzeitdatenpfad erläutert wird."
+      },
+      {
+        "title": "Kontinent- und Ozeanmaske",
+        "code": "continent = oceanBasins * 0.78 + detail * 0.34 + coastalWarp + 0.12\nshelf = smoothstep(-0.36, 0.14, continent)\ninland = smoothstep(-0.06, 0.56, continent)",
+        "description": "Sehr niederfrequenter Lärm bestimmt weite Meeresbecken, Schelfe, Küstenlinien und Binnenland, bevor lokale Hügel hinzukommen. Schelf- und Binnenlandmasken verschmelzen den Meeresboden mit erhöhtem Land, anstatt abrupt zu wechseln."
+      },
+      {
+        "title": "Grundlandhöhe",
+        "code": "oceanFloor = seaLevel - 10 + seabedNoise\ncoastHeight = seaLevel - 1 + shelf * (landBaseHeight - seaLevel + 1)\nlandHeight = landBaseHeight + inland * 4 + lowlandRelief + dunes",
+        "description": "Aktuelle Clientkonstanten sind chunkSize 16, seaLevel 96 und landBaseHeight 100. Ozeane liegen unter dem Meeresspiegel, Küsten steigen durch den Schelf an und Binnensäulen beginnen in der Nähe der Landbasis, bevor Hügel und Dünen angewendet werden."
+      },
+      {
+        "title": "Tieflandentlastung",
+        "code": "lowlandRelief = inland * (plains + lowHills + rollingRelief + dryWash + microRidges)",
+        "description": "Flaches Land ist nicht vollkommen flach. Mehrere Schichten mittelfrequenten Rauschens erzeugen Ebenen, niedrige Hügel, Trockenlagen und kleine Bergrücken, während das Gelände im Wandermaßstab lesbar bleibt."
+      },
+      {
+        "title": "Wüstendünen",
+        "code": "desert = smoothstep(-0.46, 0.18, desertMass * 1.25 + temperature * 0.44 - moisture * 0.28)\ndunes = inland * smoothstep(0.24, 0.72, desert) * duneNoise",
+        "description": "Wüsten entstehen durch heißes, trockenes, breites Klima. Wenn eine Wüstenmaske stark genug ist, wird auf dem Binnenland mithilfe von Grat- und FBM-Rauschen zusätzliche Dünenhöhe hinzugefügt."
+      },
+      {
+        "title": "Fluss-, Canyon- und Seeschnitzerei",
+        "code": "riverCut = smoothstep(0.9, 0.985, riverAt(x, z))\ncanyonCut = smoothstep(0.72, 0.94, canyonAt(x, z)) * inland\nlakeCarve = smoothstep(0.78, 0.96, lakeAt(x, z)) * basinDepth",
+        "description": "Flüsse, Schluchten und Seen werden vor der Normalisierung in das Basishöhenfeld eingraviert. Flusswege nutzen verzerrte Liniengeräusche, Schluchten schneiden tiefer in trockenes Gelände ein und Seebecken glätten tiefe Binnengebiete."
+      },
+      {
+        "title": "Bergzellen",
+        "code": "cellSize = 192\npresence = random2(cellX + 811, cellZ - 433)\nif presence < 0.36: no mountain\nsearch nearby cells for overlapping mountains",
+        "description": "Berge werden pro 192-Spalten-Zelle gesät. Eine Zelle darf keinen Berg haben, und jede sichtbare Spalte überprüft benachbarte Zellen, sodass große Fußabdrücke von Bergen die Zellgrenzen überschreiten können."
+      },
+      {
+        "title": "Bergform",
+        "code": "longRadius = radius * random(0.78..1.60)\nshortRadius = radius * random(0.38..0.84)\nangle = random * PI\nwarp = radius * random(0.035..0.11)",
+        "description": "Ein Berg ist eine abgewinkelte, gekrümmte Ellipse. Lange und kurze Radien variieren unabhängig voneinander, dann wird der Bergrücken durch lokale Koordinatenverzerrung gebogen, sodass Berge nicht wie perfekte Kegel aussehen."
+      },
+      {
+        "title": "Berghöhe und Textur",
+        "code": "radius starts 72..168 and can grow up to 8 times\nheight starts 12..27 and can grow up to 520 one-block attempts\nlocalHeight = base + height * (shoulder + spine + crag + summitNoise)",
+        "description": "Große Berge sind selten, aber möglich. Die endgültige Erhebung kombiniert abfallende Schultern, einen zentralen Grat, Gratklippen, Erosion und Gipfelrauheit und erreicht dann das Maximum aller Kandidatenberge."
+      },
+      {
+        "title": "Neigungsbegrenzer",
+        "code": "allowedStep = manhattanDistance * lerp(1.05, 4.4 + roughness * 1.4, mountainWeight)\nconstrainedHeight = min(rawHeight, neighborRaw + allowedStep)",
+        "description": "Nachdem die Rohhöhe berechnet wurde, begrenzt ein lokaler Pass Klippen gegen nahegelegene Säulen. Tieflandgebiete bleiben sanft, während Berggebiete rauer sein dürfen, ohne zu grenzenlosen Gipfeln zu werden."
+      },
+      {
+        "title": "Höhennormalisierung",
+        "code": "if rawHeight < seaLevel: keep underwater height\nelse if rawHeight < landBaseHeight: clamp to at least seaLevel + 1\nelse clamp to at least landBaseHeight",
+        "description": "Die endgültige Höhe bewahrt Unterwasserbecken, hält tief eingeschnittenes Land über dem Meeresspiegel, wenn es nicht mehr Ozean ist, und verhindert, dass normales Land unter die Landbasis fällt."
+      },
+      {
+        "title": "Klimaprobenahme",
+        "code": "temperature = fbm(0.0032 scale) + broad sine/cosine bands\nmoisture = fbm(0.0038 scale) + broad sine/cosine bands\nvalues are clamped to -1..1",
+        "description": "Temperatur und Feuchtigkeit sind weite Felder. Sie schaffen große heiße, kalte, feuchte und trockene Regionen, die später über Wüste, Tundra, Regenwald, Wald, Sumpf und Schnee entscheiden."
+      },
+      {
+        "title": "Biompriorität",
+        "code": "Ocean -> River -> Lake -> Ocean edge -> Beach -> Volcano -> Snowfield -> Mountain -> Swamp -> Wetland -> Tundra -> Desert -> Rainforest -> Forest -> Plains",
+        "description": "Die Auswahl des Bioms ist angeordnet. Wasser und besonderes Gelände gewinnen zuerst, dann Höhe und Gefälle, dann die Klimakategorien nass/kalt/heiß, mit Ebenen als Ausweichzone."
+      },
+      {
+        "title": "Wasserprofil",
+        "code": "surfaceFluid = getSurfaceFluidBlock(...)\nwaterSurfaceHeight = seaLevel for ocean/underwater\nwaterFloorHeight = surface - visualDepth\nwaterLevel may rise above terrain for lake/river/swamp/wetland",
+        "description": "Wasser ist Teil des Geländeprofils, kein Nachbearbeitungsprozess. Die Ozeane füllen sich bis zum Meeresspiegel; Flüsse, Seen, Sümpfe und Feuchtgebiete können Wasser über den örtlichen Boden bringen; Die visuelle Tiefe ist für eine lesbare Darstellung begrenzt."
+      },
+      {
+        "title": "Höhlenzellen",
+        "code": "if y >= surfaceHeight - 3 or y <= bedrock: no cave\ncaveNoise = ridgeNoise(x * 0.052 + y * 0.013, z * 0.052 - y * 0.017)\nthreshold = depth > 18 ? 0.72 : 0.84",
+        "description": "Caves werden bei Bedarf per Blockabfrage generiert. Sie erscheinen nur unterhalb der oberflächennahen Schicht, bilden sich leichter, wenn sie tiefer liegen, und legen Wände frei, wenn benachbarte Zellen offen sind.",
+        "action": {
+          "id": "findNearestCave",
+          "label": "Suche",
+          "searching": "Suchen",
+          "notFound": "In der Nähe der aktuellen Koordinaten wurde keine Höhle gefunden."
+        }
+      },
+      {
+        "title": "Chunk Rendering-Strategie",
+        "code": "visible radius = 6 chunks\nnear radius = 1 chunk full detail\nfar visible chunks = distant detail\npreload radius = 9 chunks surface detail",
+        "description": "Die Regelvorschauseite verwendet denselben Geländegenerator, lädt chunks jedoch schrittweise. In der Nähe von chunks die vollständige Dekoration beibehalten; Darüber hinaus verwendet chunks leichtere Details, damit das schnelle Surfen in der Welt reaktionsfähig bleibt."
+      }
+    ],
+    "blocks": [
+      {
+        "title": "Tiefenschichten",
+        "code": "y <= 0 -> bedrock\ny < 45 -> deepStone\ny < surfaceY - 6 -> stone or basalt\nnear surface -> biome subsurface\nsurfaceY -> biome surface",
+        "description": "Der Blocktyp hängt zunächst von der vertikalen Tiefe ab. Grundgestein verankert den Boden, tiefes Gestein füllt niedrige Schichten, gewöhnliches Gestein füllt tieferes Gelände und biomspezifische Schichten erscheinen oben."
+      },
+      {
+        "title": "Meeres-, Strand-, Fluss- und Seeoberflächen",
+        "code": "Ocean: shellBed/clay/sand/gravel\nBeach: shellBed/gravel/sand\nRiver: gravel/clay/sand\nLake: clay/sand/gravel",
+        "description": "Gewässerrandbiome nutzen Sedimentblöcke. Ozeane und Strände können Muschelbetten aufweisen, Flüsse tendieren zu Kies und Ton und Seen bestehen aus Ton oder Sand mit einigen Kiesvariationen."
+      },
+      {
+        "title": "Vulkanoberfläche",
+        "code": "if volcanic > 0.96 and roll > 0.92 -> lava\nelse basalt / ash / stone",
+        "description": "Vulkanbiome treten nur auf, wenn der vulkanische Lärm sehr hoch ist und über dem Meeresspiegel liegt. Ihre Oberflächen bestehen größtenteils aus Basalt und Asche, mit seltenen Lavazellen in der Nähe der heißesten Quellen."
+      },
+      {
+        "title": "Berg-, Schneefeld- und Tundraoberflächen",
+        "code": "Mountain: high/cold -> snow or stone, steep -> gravel or stone, gentle -> grass or stone\nSnowfield: snow/frozenSoil/ice\nTundra: frozenSoil/snow",
+        "description": "Kaltes und hohes Gelände legt Felsen, Schnee, gefrorenen Boden, Eis und Kies frei. Auf sanfteren Gebirgsebenen kann immer noch Gras getragen werden, wodurch die Gebirgsbasen bespielbar bleiben."
+      },
+      {
+        "title": "Wüstenoberfläche",
+        "code": "if roll > 0.52 or weirdness < -0.68 -> quicksand\nelse saltFlat / dryDirt / sand",
+        "description": "Wüsten bestehen meist aus sandartigem Gelände, können aber auch Treibsand, Salzwüsten und trockenen Boden enthalten. Seltsame Geräusche erzeugen unabhängig von der normalen Oberflächenwalze zusätzliche Treibsandflecken."
+      },
+      {
+        "title": "Sumpf- und Feuchtgebietsoberflächen",
+        "code": "Swamp: toxicWater / swampWater / mud / clay\nWetland: clay / mud / grass",
+        "description": "Nassbereiche vermischen festen Boden mit flachen, wasserähnlichen Oberflächen. Beschädigte Sumpfproben können zu giftigem Wasser werden; Feuchtgebiete bleiben mit Lehm, Schlamm und Gras sanfter."
+      },
+      {
+        "title": "Regenwald-, Wald- und Ebenenoberflächen",
+        "code": "Rainforest: mud or grass, rare moss\nForest: grass, rare moss when humid\nPlains: grass, with dryDirt or clay when humidity is extreme",
+        "description": "Reguläre Landflächen sind klimasensitiv. Der Regenwald ist feuchter und schlammiger, in feuchten Zellen kann im Wald Moos wachsen und bei extremen Klimabedingungen verschieben sich die Ebenen leicht in Richtung trockener Erde oder Lehm."
+      },
+      {
+        "title": "Untergrundregeln",
+        "code": "Desert/Beach -> sand/gravel/stone\nWet biomes -> clay/mud/stone\nSnow/Tundra -> frozenSoil/stone\nVolcano -> basalt/lava/stone\nDefault -> dirt/gravel/clay",
+        "description": "Der Block unterhalb der oberen Oberfläche folgt ebenfalls dem Biom. Dadurch passen sich Klippen und verminte Seitenwände der örtlichen Umgebung an, anstatt jede Säule in die gleiche Erdschicht zu verwandeln."
+      },
+      {
+        "title": "Natürliche Flüssigkeiten",
+        "code": "Volcano vent -> lava\nRiver/Lake -> water\nSwamp -> swampWater\nWetland chance -> water\nunder seaLevel -> water/ice/toxicWater/swampWater",
+        "description": "Flüssigkeitsblöcke werden nach dem Biom ausgewählt. Kalte Unterwasserzellen werden zu Eis, verdorbene Feuchtgebiete können zu giftigem Wasser werden, sumpfige Gebiete nutzen Sumpfwasser und Vulkanschlote können Lava ausstoßen."
+      },
+      {
+        "title": "Flüssigkeitshöhe",
+        "code": "Lava level = terrain height\nOcean/underwater level = seaLevel\nLake level = height + 2..4\nRiver level = height + 1..2\nSwamp/Wetland level = height + 1",
+        "description": "Unterschiedliche Flüssigkeiten nutzen unterschiedliche sichtbare Werte. Dadurch liegen Flüsse und Seen über den lokalen Böden, während die Ozeane auf einem gemeinsamen Meeresspiegel bleiben."
+      },
+      {
+        "title": "Darstellung der Wassertiefe",
+        "code": "Ocean depth = clamp(seaLevel - groundHeight, 1, 4)\nRiver depth grows near erosion center\nLake depth grows near basin center\nSwamp/Wetland depth = 1",
+        "description": "Die sichtbare Wassertiefe ist auf vier Blöcke begrenzt. Die Kappe sorgt dafür, dass Unterwassersäulen kostengünstig gerendert werden können und verhindert, dass tiefe Becken die Vorschau überfordern."
+      },
+      {
+        "title": "Wasserdekoration",
+        "code": "Ocean: warm shallow water can spawn coral\nOcean: cold/corrupted water can spawn dead coral\nSwamp/Wetland/River/Lake: rare reeds",
+        "description": "Pflanzen können auch aus Wasserzellen entstehen. Korallen sind auf flache, warme Ozeane beschränkt, abgestorbene Korallen markieren kaltes oder verdorbenes Wasser und Schilf kommt selten in der Nähe von Feuchtbiomen außerhalb des Ozeans vor."
+      },
+      {
+        "title": "Trockene und heiße Vegetation",
+        "code": "Desert on sand/dryDirt/ash:\n  cactus, deadBush, thorn, dryGrass by roll thresholds",
+        "description": "Wüstendekoration erscheint nur auf geeigneten trockenen Oberflächen. Kakteen erfordern eine zusätzliche grobe Walze, sodass sie als verstreute Bestände statt als gleichmäßiges Geräusch erscheinen."
+      },
+      {
+        "title": "Feucht- und Waldvegetation",
+        "code": "Swamp/Wetland: moss, vine, reed, rare mushroom\nRainforest: giantRoot, moss, vine, rare mushroom, bush\nForest: bush, vine, rare mushroom, grassPlant",
+        "description": "Feuchte Regionen begünstigen Bodendecker, Weinreben, Wurzeln, Schilf und Pilze. Regenwald erhält den stärksten Aufschwung, während normaler Wald hauptsächlich aus Gras und Büschen besteht."
+      },
+      {
+        "title": "Kälte und Bergvegetation",
+        "code": "Snowfield/Tundra: snowBush or lichen\nMountain: snowBush when cold, otherwise lichen or bush\nslope > 4 blocks most non-mountain vegetation",
+        "description": "Kalte Biome verwenden spärliche, winterharte Dekoration. Steile Hänge unterdrücken den größten Teil der Vegetation, mit Ausnahme der bergspezifischen Dekoration, die dafür sorgt, dass die Klippen optisch sauber bleiben."
+      },
+      {
+        "title": "Baumdichte",
+        "code": "treeDensity = forestFloor * (1 - altitudePenalty) + meadowTrees + biomeBoost\nblocked if biome cannot grow trees, slope > 3, or height <= 4",
+        "description": "Bäume werden durch Biom, Neigung, Höhe, Waldstärke, Wiesenlärm und Biom-Boosts gesteuert. Regenwald und Wald erhalten einen stärkeren Aufschwung, während die Höhenlage die Dichte verringert."
+      },
+      {
+        "title": "Baumart und Blätter",
+        "code": "pine when cold/high/mountain/snow or seed roll says evergreen\ntrunkType = pineTrunk / giantRoot / deadWood / trunk\nleafType = pine, snow, teal, dark, light, warm, or normal leaves",
+        "description": "Baumform und -farbe sind pro Gebiet deterministisch. Kalte und hohe Standorte bevorzugen Kiefern, Regenwälder können Riesenwurzeln und blaugrüne/dunkle Blätter verwenden und normale Wälder variieren den Blattton je nach Samenrolle."
+      },
+      {
+        "title": "Höhlenwandblöcke",
+        "code": "adjacent open cave -> cave wall\nif y < 45 -> deep cave\nrare lava in deep or volcanic caves\nrare toxic water in corrupted caves\nwall = deepStone or stone, sometimes gravel",
+        "description": "Eine feste Zelle neben einer offenen Höhle wird zu einer freigelegten Höhlenwand. In tiefen Höhlen werden häufiger tiefe Steine ​​und leuchtendes Myzel verwendet; Vulkanische oder beschädigte Höhlen können gefährliche Flüssigkeiten freisetzen."
+      },
+      {
+        "title": "Höhlendekoration",
+        "code": "deep cave and floorNoise > 0.45 -> glowMycelium\nhumid rare roll -> mushroom\notherwise lichen or moss by floorNoise and humidity",
+        "description": "Höhlenoberflächen können kleine Dekorationen tragen. Tiefe Höhlen begünstigen leuchtendes Myzel, feuchte Höhlen können Pilze oder Moos produzieren und Flechten erscheinen als allgemeine Höhlendecke."
+      },
+      {
+        "title": "Generierte Blockabfrage",
+        "code": "getGeneratedBlock(x, y, z):\n  water above surface when inside fluid level\n  null above terrain and above seaLevel\n  cave cells return null\n  cave-adjacent cells return cave walls\n  otherwise return terrain by depth",
+        "description": "Der Motor speichert nicht das gesamte Gelände vor. Es beantwortet Blockabfragen aus den Profil- und Tiefenregeln, sodass Rendering, Kollision, Bergbau und Wassersimulation dieselbe prozedurale Welt lesen können."
+      }
+    ]
+  }
+}
