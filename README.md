@@ -12,6 +12,16 @@ The page is documentation with live rendering. It helps contributors understand 
 
 It intentionally depends on world generation modules rather than duplicating algorithm logic in prose.
 
+## Runtime Boundary
+
+![World rule preview runtime boundary](docs/diagrams/preview-runtime-boundary.svg)
+
+The world rule page is a debugger for the generator. It imports the same seed, terrain profile, block lookup, chunk construction, and material code used by the client, then wraps it with camera controls, queueing, and explanatory copy.
+
+That separation matters. A rendering glitch should not be confused with a rule change, and a rule change should show up as a deterministic output change rather than a rewritten screenshot. The page is useful when it makes those differences obvious.
+
+The preview runtime is allowed to manage flight controls, chunk build budgets, preload caches, local view persistence, and procedural material animation. It is not allowed to invent terrain semantics that do not exist in the generator.
+
 ## System Principles
 
 - Explain with live data: rule pages should render actual generated results whenever possible.
