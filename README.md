@@ -22,6 +22,14 @@ That separation matters. A rendering glitch should not be confused with a rule c
 
 The preview runtime is allowed to manage flight controls, chunk build budgets, preload caches, local view persistence, and procedural material animation. It is not allowed to invent terrain semantics that do not exist in the generator.
 
+## Rule Inspection Loop
+
+![Rule inspection loop](docs/diagrams/rule-inspection-loop.svg)
+
+The world rule page should behave like an inspection loop for worldgen changes. A developer selects a seed and position, the page asks the generator for terrain and blocks, the runtime renders a visible sample, and the documentation explains what changed. That gives designers a useful review surface without copying the terrain algorithm into prose.
+
+This repository should stay honest about its role. It documents and visualizes generated behavior; it does not define the behavior itself. When the reusable generator changes, this page should make the delta visible through screenshots, rule copy, and live inspection states.
+
 ## System Principles
 
 - Explain with live data: rule pages should render actual generated results whenever possible.
