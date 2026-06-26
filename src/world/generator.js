@@ -7,9 +7,9 @@ const rawHeightCache = new Map();
 const baseHeightCache = new Map();
 const mountainCellCache = new Map();
 let worldSeed = hashSeed("nicechunk-mainnet-001");
-const bedrockMaxY = 0;
-const deepStoneStartY = 45;
-const maxVisualWaterDepth = 4;
+export const bedrockMaxY = 0;
+export const deepStoneStartY = 45;
+export const maxVisualWaterDepth = 4;
 
 export function setWorldSeed(seed) {
   worldSeed = hashSeed(seed);
@@ -148,7 +148,7 @@ export function getBlockByDepth(y, surfaceY, biome, sample, x = 0, z = 0) {
     if (y > sample.waterFloorHeight && y <= sample.waterSurfaceHeight) return sample.waterBlock ?? WorldMapBlock.Water;
     if (y === sample.waterFloorHeight) return getSurfaceBlock(biome, sample, sample.groundHeight ?? surfaceY, 0, x, z);
   }
-  if (y < deepStoneStartY) return WorldMapBlock.DeepStone;
+  if (y < deepStoneStartY) return coalSeamAt(x, y, z, surfaceY) ? WorldMapBlock.Coal : WorldMapBlock.DeepStone;
   if (y < surfaceY - 6) {
     if (biome === BiomeType.Volcano && sample.volcanic > 0.62 && random2(x + y * 13, z - y * 17) > 0.76) return WorldMapBlock.Basalt;
     return WorldMapBlock.Stone;
@@ -757,7 +757,7 @@ function getAdjacentCaveBlock(x, y, z, profile) {
     return generatedBlock(WorldMapBlock.ToxicWater, undefined, WorldMapBlock.ToxicWater, biome, profile);
   }
 
-  const wall = deep ? WorldMapBlock.DeepStone : WorldMapBlock.Stone;
+  const wall = deep ? (coalSeamAt(x, y, z, profile.height) ? WorldMapBlock.Coal : WorldMapBlock.DeepStone) : WorldMapBlock.Stone;
   const vegetation =
     deep && floorNoise > 0.45
       ? WorldMapBlock.GlowMycelium
@@ -770,6 +770,16 @@ function getAdjacentCaveBlock(x, y, z, profile) {
             : undefined;
 
   return generatedBlock(floorNoise < 0.18 ? WorldMapBlock.Gravel : wall, vegetation, undefined, biome, profile);
+}
+
+function coalSeamAt(x, y, z, surfaceY) {
+  if (y <= bedrockMaxY + 2 || y >= deepStoneStartY || y >= surfaceY - 10) return false;
+  const seamMass = valueNoise(x * 0.031 + 3400, z * 0.031 - 3550);
+  if (seamMass < 0.54) return false;
+  const layer = ridgeNoise(x * 0.045 + y * 0.08 - 3720, z * 0.045 - y * 0.06 + 3810);
+  if (layer < 0.38) return false;
+  const pocket = valueNoise(x * 0.12 + y * 0.19 + 3910, z * 0.12 - y * 0.17 - 4020);
+  return pocket > 0.18;
 }
 
 function fbm(x, z, octaves) {

@@ -47,6 +47,7 @@ export const WorldMapBlock = Object.freeze({
   Coral: 44,
   DeadCoral: 45,
   ShellBed: 46,
+  Coal: 47,
 });
 
 export const BiomeType = Object.freeze({
@@ -115,6 +116,7 @@ export const WORLD_MAP_BLOCK_DEBUG_COLOR = Object.freeze({
   [WorldMapBlock.Coral]: "#ff7f7f",
   [WorldMapBlock.DeadCoral]: "#9a8f86",
   [WorldMapBlock.ShellBed]: "#e4d6b5",
+  [WorldMapBlock.Coal]: "#1b1a1d",
 });
 
 export const WORLD_MAP_BLOCK_RENDER_TYPE = Object.freeze({
@@ -164,6 +166,7 @@ export const WORLD_MAP_BLOCK_RENDER_TYPE = Object.freeze({
   [WorldMapBlock.Coral]: "coral",
   [WorldMapBlock.DeadCoral]: "deadCoral",
   [WorldMapBlock.ShellBed]: "shellBed",
+  [WorldMapBlock.Coal]: "coal",
 });
 
 export function renderTypeForBlock(block) {

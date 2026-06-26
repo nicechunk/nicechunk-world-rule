@@ -3,6 +3,7 @@ export const blockRenderProfiles = Object.freeze({
   dirt: { color: 0x8a5a35, style: "dirt" },
   stone: { color: 0x7d8278, style: "stone" },
   deepStone: { color: 0x343743, style: "deepStone" },
+  coal: { color: 0x1b1a1d, style: "coal" },
   sand: { color: 0xcdbb73, style: "sand" },
   sandstone: { color: 0xb58d54, style: "sandstone" },
   gravel: { color: 0x8a8579, style: "gravel" },

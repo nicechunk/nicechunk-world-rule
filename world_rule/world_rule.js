@@ -6,12 +6,14 @@ import { currentWorldSeed, getGeneratedBlock, setWorldSeed, terrainProfile } fro
 import { createWorldState } from "../src/world/state.js";
 import { createChunkGroup } from "../src/world/chunks.js";
 import { chunkKey } from "../src/world/keys.js";
+import { defaultWorldSeed, normalizeSeed, readPlayWorldSeed } from "../src/world/seedStorage.js";
 import {
   updateProceduralMaterialSeed,
   updateProceduralMaterialTime,
 } from "../src/render/proceduralMaterials.js";
 import { createWorldGeometryByType, createWorldMaterials } from "../src/world/rendering.js";
-import { initWorldRuleI18n, worldRuleList, worldRuleT } from "./i18n.js";
+import { getWorldAlgorithmSpec } from "../src/data/worldAlgorithmRules.js";
+import { initWorldRuleI18n, worldRuleT } from "./i18n.js";
 
 const canvas = document.querySelector("#worldPreview");
 const seedInput = document.querySelector("#seedInput");
@@ -91,7 +93,7 @@ setSiteLoadingProgress(28);
 await initWorldRuleI18n();
 setSiteLoadingProgress(54);
 renderRules();
-seedInput.value = localStorage.getItem(seedStorageKey) || "nicechunk-mainnet-001";
+seedInput.value = initialWorldRuleSeed();
 applySeed(seedInput.value);
 resize();
 animate();
@@ -119,7 +121,7 @@ seedInput.addEventListener("keydown", (event) => {
 window.addEventListener("nicechunk:worldrulelanguagechange", renderRules);
 
 function applySeed(seed) {
-  const nextSeed = String(seed || "nicechunk-mainnet-001").trim() || "nicechunk-mainnet-001";
+  const nextSeed = normalizeSeed(seed);
   seedInput.value = nextSeed;
   if (previewSeedLabel) previewSeedLabel.textContent = nextSeed;
   localStorage.setItem(seedStorageKey, nextSeed);
@@ -145,6 +147,10 @@ function applySeed(seed) {
   pendingChunkRefreshKeys = [];
   targetChunkCount = 0;
   savePreviewView(true);
+}
+
+function initialWorldRuleSeed() {
+  return readPlayWorldSeed() ?? localStorage.getItem(seedStorageKey) ?? defaultWorldSeed;
 }
 
 function findPreviewStart() {
@@ -379,38 +385,36 @@ function isChunkInRange(chunkX, chunkZ, radius) {
 }
 
 function renderRules() {
+  const spec = getWorldAlgorithmSpec();
   renderPipeline();
   renderBiomeStrip();
-  const sections = [
-    ["generation", worldRuleT("rules.generationTitle")],
-    ["blocks", worldRuleT("rules.blockTitle")],
-  ];
   const nodes = [];
 
-  for (const [key, title] of sections) {
+  for (const section of spec.sections) {
     const heading = document.createElement("h2");
     heading.className = "rule-section-title";
-    heading.textContent = title;
+    heading.textContent = worldRuleT(section.titleKey);
     nodes.push(heading);
 
-    for (const rule of worldRuleList(`rules.${key}`)) {
+    for (const rule of spec.rules[section.id] ?? []) {
       const article = document.createElement("article");
       const ruleTitle = document.createElement("h2");
       const code = document.createElement("code");
       const description = document.createElement("p");
-      ruleTitle.textContent = rule.title;
+      ruleTitle.textContent = worldRuleT(`rules.items.${rule.id}.title`);
       code.className = "rule-code";
       code.textContent = rule.code;
-      description.textContent = rule.description;
+      description.textContent = worldRuleT(`rules.items.${rule.id}.description`);
       article.append(ruleTitle, code, description);
       if (rule.action?.id === "findNearestCave") {
         const actions = document.createElement("div");
         const button = document.createElement("button");
+        const action = localizedRuleAction(rule.action.id);
         actions.className = "rule-actions";
         button.className = "rule-action-button";
         button.type = "button";
-        button.textContent = rule.action.label;
-        button.addEventListener("click", () => handleFindNearestCave(button, rule.action));
+        button.textContent = action.label;
+        button.addEventListener("click", () => handleFindNearestCave(button, action));
         actions.append(button);
         article.append(actions);
       }
@@ -423,17 +427,17 @@ function renderRules() {
 
 function renderPipeline() {
   if (!pipelineList) return;
-  const steps = worldRuleList("pipeline.steps");
+  const steps = getWorldAlgorithmSpec().pipelineStepIds;
   pipelineList.replaceChildren(
-    ...steps.map((step, index) => {
+    ...steps.map((stepId, index) => {
       const item = document.createElement("li");
       const number = document.createElement("b");
       const copy = document.createElement("div");
       const title = document.createElement("strong");
       const body = document.createElement("p");
       number.textContent = String(index + 1).padStart(2, "0");
-      title.textContent = step.title;
-      body.textContent = step.body;
+      title.textContent = worldRuleT(`pipeline.steps.${stepId}.title`);
+      body.textContent = worldRuleT(`pipeline.steps.${stepId}.body`);
       copy.append(title, body);
       item.append(number, copy);
       return item;
@@ -444,12 +448,21 @@ function renderPipeline() {
 function renderBiomeStrip() {
   if (!biomeStrip) return;
   biomeStrip.replaceChildren(
-    ...worldRuleList("biomes.items").map((label) => {
+    ...getWorldAlgorithmSpec().biomePriorityIds.map((biomeId) => {
       const item = document.createElement("span");
-      item.textContent = label;
+      item.textContent = worldRuleT(`biomes.items.${biomeId}`);
       return item;
     }),
   );
+}
+
+function localizedRuleAction(actionId) {
+  return {
+    id: actionId,
+    label: worldRuleT(`rules.actions.${actionId}.label`),
+    searching: worldRuleT(`rules.actions.${actionId}.searching`),
+    notFound: worldRuleT(`rules.actions.${actionId}.notFound`),
+  };
 }
 
 function mergePendingChunkKeys(current, next, visibleKeys, centerChunkX, centerChunkZ) {

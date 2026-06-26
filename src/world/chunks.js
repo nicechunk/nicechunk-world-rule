@@ -1,5 +1,6 @@
-import { chunkSize, cloudMinHeight, cloudSectorSize, seaLevel } from "./config.js";
-import { currentWorldSeed, getGeneratedBlock, getBlockByDepth, surfaceWaterLevel, terrainHeight, terrainProfile, treeDensityAt } from "./generator.js";
+import { chunkSize, cloudMinHeight, cloudSectorSize, minBuildY } from "./config.js";
+import { currentWorldSeed, terrainProfile } from "./generator.js";
+import { canonicalAboveSurfaceBlocksInArea, canonicalRenderTypeAt, canonicalSurfaceHeightAt, canonicalWaterLevelAt } from "./canonicalResource.js";
 import { WorldMapBlock, renderTypeForBlock } from "./blocks.js";
 import { blockKey, parseCellKey } from "./keys.js";
 import { isSolidCell } from "./state.js";
@@ -7,6 +8,15 @@ import { isSolidCell } from "./state.js";
 const waterSurfaceOffset = 0.56;
 const waterVisualHeightScale = 2 / 3;
 const waterVisualCenterOffset = -1 / 6;
+const cubeHalfSize = 0.5;
+const cavityNeighborOffsets = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
 
 export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType, materials, detailMode = "full" }) {
   const group = new THREE.Group();
@@ -14,14 +24,24 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
   group.userData.detailMode = detailMode;
   group.userData.solidKeys = new Set();
   const fullDetail = detailMode === "full";
+  const decorationDetail = detailMode === "full" || detailMode === "decorated";
   const treeDetail = detailMode !== "surface";
-  const terrainColumnDepth = fullDetail ? 5 : 2;
+  const castChunkShadows = chunkDetailCastsShadows(detailMode);
+  const receiveChunkShadows = chunkDetailReceivesShadows(detailMode);
+  const terrainColumnDepth = fullDetail ? 2 : 0;
+  const surfaceAt = createSurfaceReader();
+  const minX = chunkX * chunkSize;
+  const maxX = minX + chunkSize - 1;
+  const minZ = chunkZ * chunkSize;
+  const maxZ = minZ + chunkSize - 1;
+  const aboveSurfaceByColumn = treeDetail ? createAboveSurfaceColumnMap(canonicalAboveSurfaceBlocksInArea({ minX, maxX, minZ, maxZ })) : null;
 
   const matrices = {
     grass: [],
     dirt: [],
     stone: [],
     deepStone: [],
+    coal: [],
     sand: [],
     sandstone: [],
     gravel: [],
@@ -105,31 +125,26 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     for (let localX = 0; localX < chunkSize; localX++) {
       const x = chunkX * chunkSize + localX;
       const z = chunkZ * chunkSize + localZ;
-      const profile = terrainProfile(x, z);
-      const height = profile.height;
-      const topType = renderTypeForBlock(profile.terrain) ?? profile.surfaceType;
-      const waterFloorHeight = profile.noise.waterFloorHeight;
-      const columnStart = Math.min(
-        exposedColumnStart(x, z, height, terrainColumnDepth),
-        waterFloorHeight === null || waterFloorHeight === undefined ? height : waterFloorHeight,
-      );
+      const height = surfaceAt(x, z);
+      const columnStart = exposedColumnStart(x, z, height, terrainColumnDepth, surfaceAt);
 
       if (fullDetail) {
-        pushBlock(state, matrices.bedrock, "bedrock", x, 0, z, transform, rotation, scale, THREE, group.userData.solidKeys);
+        pushBlock(state, matrices.bedrock, "bedrock", x, minBuildY, z, transform, rotation, scale, THREE, group.userData.solidKeys);
       }
 
-      for (let y = Math.max(1, columnStart); y <= height; y++) {
-        const block = y === height ? profile.terrain : getBlockByDepth(y, height, profile.biome, profile.noise, x, z);
-        const type = renderTypeForBlock(block);
+      for (let y = Math.max(minBuildY, columnStart); y <= height; y++) {
+        const type = canonicalRenderTypeAt({ x, y, z });
         const key = blockKey(x, y, z);
         if (type && matrices[type] && !(state.placedBlocks.has(key) && !state.removedBlocks.has(key))) {
           pushBlock(state, matrices[type], type, x, y, z, transform, rotation, scale, THREE, group.userData.solidKeys);
         }
       }
 
-      if (profile.fluid) {
-        const fluidType = renderTypeForBlock(profile.fluid ?? WorldMapBlock.Water) ?? "water";
-        const waterY = surfaceWaterLevel(x, z, profile) ?? (height < seaLevel ? seaLevel : height);
+      const canonicalWaterY = canonicalWaterLevelAt({ x, z, surface: height });
+      const underCanonicalWater = canonicalWaterY !== null && canonicalWaterY > height;
+      if (underCanonicalWater) {
+        const fluidType = "water";
+        const waterY = canonicalWaterY;
         const fluidKey = `${fluidType}:${waterY}`;
         if (!sourceFluidCells.has(fluidKey)) sourceFluidCells.set(fluidKey, { fluidType, waterY, cells: [] });
         sourceFluidCells.get(fluidKey).cells.push([localX, localZ]);
@@ -137,20 +152,17 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
       }
 
       const surfaceSupportVisible = isSurfaceSupportVisible(state, x, height, z);
-      let treeCell = false;
-      if (treeDetail && surfaceSupportVisible) {
-        treeCell = canGrowTree(profile) && isTreeCell(x, z, profile);
-        if (treeCell) {
-          if (fullDetail) {
-            addTreeMatrices(state, matrices, x, height + 1, z, profile.tree, transform, rotation, scale, THREE, group.userData.solidKeys);
-          } else {
-            addDistantTreeMatrices(state, matrices, x, height + 1, z, profile.tree, transform, rotation, scale, THREE, group.userData.solidKeys);
-          }
-        } else if (fullDetail && profile.vegetation && height > 3) {
+      const canonicalAboveSurface = treeDetail && surfaceSupportVisible && !underCanonicalWater
+        ? addCanonicalAboveSurfaceBlocks(state, matrices, aboveSurfaceByColumn, x, z, transform, rotation, scale, THREE, group.userData.solidKeys)
+        : false;
+
+      if (decorationDetail && surfaceSupportVisible && !underCanonicalWater) {
+        const profile = terrainProfile(x, z);
+        if (!canonicalAboveSurface && profile.vegetation && height > 3) {
           addVegetationDecoration(matrices, x, height, z, profile.vegetation, transform, rotation, scale, THREE);
         }
 
-        if (fullDetail) addSurfaceDetail(matrices, decorationBudget, x, height, z, profile, treeCell, transform, THREE);
+        addSurfaceDetail(matrices, decorationBudget, x, height, z, profile, canonicalAboveSurface, transform, THREE);
       }
     }
   }
@@ -170,30 +182,413 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     const [x, y, z] = parseCellKey(key);
     if (Math.floor(x / chunkSize) !== chunkX || Math.floor(z / chunkSize) !== chunkZ) continue;
     if (!matrices[type]) continue;
-    pushBlock(state, matrices[type], type, x, y, z, transform, rotation, scale, THREE, group.userData.solidKeys);
+    pushBlock(state, matrices[type], type, x, y, z, transform, rotation, scale, THREE, group.userData.solidKeys, false);
+  }
+
+  addRemovedBlockCavityShell(state, matrices, chunkX, chunkZ, transform, rotation, scale, THREE, group.userData.solidKeys);
+
+  const chunkMeshSolidKeys = new Set();
+  for (const list of Object.values(matrices)) {
+    for (const entry of list) {
+      if (entry.meshable && entry.block && !state.removedBlocks.has(entry.block.key)) chunkMeshSolidKeys.add(entry.block.key);
+    }
   }
 
   const instanceColor = new THREE.Color();
   for (const [type, list] of Object.entries(matrices)) {
     if (!list.length) continue;
-    const mesh = new THREE.InstancedMesh(geometryByType[type], materials[type], list.length);
+    const meshableEntries = list.filter((entry) => entry.meshable);
+    const instanceEntries = list.filter((entry) => entry.matrix);
+    if (meshableEntries.length) {
+      const geometry = createVisibleVoxelGeometry(THREE, state, meshableEntries, chunkMeshSolidKeys, surfaceAt);
+      if (geometry) {
+        const material = geometry.userData.hasVertexColors ? materials[type].clone() : materials[type];
+        if (geometry.userData.hasVertexColors) material.vertexColors = true;
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.castShadow = castChunkShadows && chunkTypeUsesShadows(type);
+        mesh.receiveShadow = receiveChunkShadows && chunkTypeReceivesShadows(type);
+        mesh.userData.blocks = [];
+        mesh.userData.greedyVoxelMesh = true;
+        mesh.userData.meshType = type;
+        group.add(mesh);
+      }
+    }
+    if (!instanceEntries.length) continue;
+    const mesh = new THREE.InstancedMesh(geometryByType[type], materials[type], instanceEntries.length);
     let hasInstanceColors = false;
-    list.forEach((entry, index) => {
+    instanceEntries.forEach((entry, index) => {
       mesh.setMatrixAt(index, entry.matrix);
       if (!entry.tint) return;
       mesh.setColorAt(index, instanceColor.setRGB(entry.tint[0], entry.tint[1], entry.tint[2]));
       hasInstanceColors = true;
     });
     if (hasInstanceColors && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    const interactive = list.some((entry) => entry.block);
-    mesh.castShadow = type !== "water" && type !== "shoreDamp" && type !== "shoreFoam";
-    mesh.receiveShadow = type !== "shoreDamp" && type !== "shoreFoam";
+    const interactive = instanceEntries.some((entry) => entry.block);
+    mesh.castShadow = castChunkShadows && chunkTypeUsesShadows(type);
+    mesh.receiveShadow = receiveChunkShadows && chunkTypeReceivesShadows(type);
+    updateInstancedMeshBounds(mesh);
     if (!interactive) mesh.raycast = () => {};
-    mesh.userData.blocks = list.map((entry) => entry.block);
+    mesh.userData.blocks = interactive ? instanceEntries.map((entry) => entry.block) : [];
     group.add(mesh);
   }
 
   return group;
+}
+
+function chunkDetailCastsShadows(detailMode) {
+  return detailMode === "full" || detailMode === "decorated";
+}
+
+function chunkDetailReceivesShadows(detailMode) {
+  return detailMode === "full" || detailMode === "decorated";
+}
+
+function chunkTypeUsesShadows(type) {
+  return type !== "water" && type !== "swampWater" && type !== "toxicWater" && type !== "lava" && type !== "shoreDamp" && type !== "shoreFoam";
+}
+
+function chunkTypeReceivesShadows(type) {
+  return type !== "shoreDamp" && type !== "shoreFoam" && type !== "water" && type !== "swampWater" && type !== "toxicWater";
+}
+
+function createAboveSurfaceColumnMap(blocks) {
+  const byColumn = new Map();
+  for (const block of blocks) {
+    let byZ = byColumn.get(block.x);
+    if (!byZ) {
+      byZ = new Map();
+      byColumn.set(block.x, byZ);
+    }
+    if (!byZ.has(block.z)) byZ.set(block.z, []);
+    byZ.get(block.z).push(block);
+  }
+  return byColumn;
+}
+
+function createSurfaceReader() {
+  const cache = new Map();
+  return (x, z) => {
+    const cachedByZ = cache.get(x);
+    const cached = cachedByZ?.get(z);
+    if (cached !== undefined) return cached;
+    const height = canonicalSurfaceHeightAt({ x, z });
+    if (cachedByZ) {
+      cachedByZ.set(z, height);
+    } else {
+      cache.set(x, new Map([[z, height]]));
+    }
+    return height;
+  };
+}
+
+function addCanonicalAboveSurfaceBlocks(state, matrices, aboveSurfaceByColumn, x, z, transform, rotation, scale, THREE, solidKeys) {
+  const blocks = aboveSurfaceByColumn?.get(x)?.get(z);
+  if (!blocks?.length) return false;
+  let added = false;
+  for (const block of blocks) {
+    if (!matrices[block.type]) continue;
+    const key = blockKey(block.x, block.y, block.z);
+    if (state.placedBlocks.has(key) && !state.removedBlocks.has(key)) continue;
+    pushBlock(state, matrices[block.type], block.type, block.x, block.y, block.z, transform, rotation, scale, THREE, solidKeys, false);
+    added = true;
+  }
+  return added;
+}
+
+function addRemovedBlockCavityShell(state, matrices, chunkX, chunkZ, transform, rotation, scale, THREE, solidKeys) {
+  if (!state.removedBlocks.size) return;
+  const minX = chunkX * chunkSize;
+  const maxX = minX + chunkSize - 1;
+  const minZ = chunkZ * chunkSize;
+  const maxZ = minZ + chunkSize - 1;
+
+  for (const removedKey of state.removedBlocks) {
+    const [rx, ry, rz] = parseCellKey(removedKey);
+    if (!Number.isFinite(rx) || !Number.isFinite(ry) || !Number.isFinite(rz)) continue;
+
+    for (const [dx, dy, dz] of cavityNeighborOffsets) {
+      const x = rx + dx;
+      const y = ry + dy;
+      const z = rz + dz;
+      if (x < minX || x > maxX || z < minZ || z > maxZ) continue;
+
+      const key = blockKey(x, y, z);
+      if (state.removedBlocks.has(key) || state.placedBlocks.has(key) || solidKeys.has(key)) continue;
+
+      const type = canonicalRenderTypeAt({ x, y, z });
+      if (!type || !matrices[type] || isNonSolidVisualType(type)) continue;
+      pushBlock(state, matrices[type], type, x, y, z, transform, rotation, scale, THREE, solidKeys, false);
+    }
+  }
+}
+
+function createVisibleVoxelGeometry(THREE, state, entries, chunkMeshSolidKeys, surfaceAt) {
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  const occlusionMemo = new Map();
+  const faceGroups = new Map();
+
+  for (const entry of entries) {
+    if (!entry.block) continue;
+    const { x, y, z, key } = entry.block;
+    if (state.removedBlocks.has(key)) continue;
+
+    for (let faceIndex = 0; faceIndex < voxelFaces.length; faceIndex += 1) {
+      const face = voxelFaces[faceIndex];
+      if (isVoxelFaceOccluded(state, chunkMeshSolidKeys, occlusionMemo, surfaceAt, x + face.dx, y + face.dy, z + face.dz)) continue;
+      addGreedyFaceCell(faceGroups, faceIndex, x, y, z);
+    }
+  }
+
+  for (const group of faceGroups.values()) appendGreedyFaceGroup(group, positions, normals, indices);
+
+  if (!indices.length) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  geometry.setIndex(indices);
+  geometry.computeBoundingSphere();
+  geometry.userData.hasVertexColors = false;
+  return geometry;
+}
+
+function addGreedyFaceCell(faceGroups, faceIndex, x, y, z) {
+  const cell = greedyFaceCell(faceIndex, x, y, z);
+  const groupKey = `${faceIndex}:${cell.plane}`;
+  let group = faceGroups.get(groupKey);
+  if (!group) {
+    group = {
+      faceIndex,
+      plane: cell.plane,
+      cellsByV: new Map(),
+      minU: cell.u,
+      maxU: cell.u,
+      minV: cell.v,
+      maxV: cell.v,
+    };
+    faceGroups.set(groupKey, group);
+  }
+  addGreedyCell(group, cell.u, cell.v);
+  group.minU = Math.min(group.minU, cell.u);
+  group.maxU = Math.max(group.maxU, cell.u);
+  group.minV = Math.min(group.minV, cell.v);
+  group.maxV = Math.max(group.maxV, cell.v);
+}
+
+function addGreedyCell(group, u, v) {
+  let row = group.cellsByV.get(v);
+  if (!row) {
+    row = new Set();
+    group.cellsByV.set(v, row);
+  }
+  row.add(u);
+}
+
+function hasGreedyCell(group, u, v) {
+  return group.cellsByV.get(v)?.has(u) ?? false;
+}
+
+function greedyFaceCell(faceIndex, x, y, z) {
+  switch (faceIndex) {
+    case 0:
+      return { plane: x + cubeHalfSize, u: z, v: y };
+    case 1:
+      return { plane: x - cubeHalfSize, u: z, v: y };
+    case 2:
+      return { plane: y + cubeHalfSize, u: x, v: z };
+    case 3:
+      return { plane: y - cubeHalfSize, u: x, v: z };
+    case 4:
+      return { plane: z + cubeHalfSize, u: x, v: y };
+    default:
+      return { plane: z - cubeHalfSize, u: x, v: y };
+  }
+}
+
+function appendGreedyFaceGroup(group, positions, normals, indices) {
+  const visitedByV = new Map();
+  for (let v = group.minV; v <= group.maxV; v += 1) {
+    for (let u = group.minU; u <= group.maxU; u += 1) {
+      if (hasVisitedGreedyCell(visitedByV, u, v) || !hasGreedyCell(group, u, v)) continue;
+
+      let width = 1;
+      while (hasGreedyCell(group, u + width, v) && !hasVisitedGreedyCell(visitedByV, u + width, v)) width += 1;
+
+      let height = 1;
+      growHeight: while (v + height <= group.maxV) {
+        for (let dx = 0; dx < width; dx += 1) {
+          if (!hasGreedyCell(group, u + dx, v + height) || hasVisitedGreedyCell(visitedByV, u + dx, v + height)) break growHeight;
+        }
+        height += 1;
+      }
+
+      for (let dy = 0; dy < height; dy += 1) {
+        for (let dx = 0; dx < width; dx += 1) addVisitedGreedyCell(visitedByV, u + dx, v + dy);
+      }
+
+      appendGreedyQuad(group.faceIndex, group.plane, u - cubeHalfSize, u + width - cubeHalfSize, v - cubeHalfSize, v + height - cubeHalfSize, positions, normals, indices);
+    }
+  }
+}
+
+function hasVisitedGreedyCell(visitedByV, u, v) {
+  return visitedByV.get(v)?.has(u) ?? false;
+}
+
+function addVisitedGreedyCell(visitedByV, u, v) {
+  let row = visitedByV.get(v);
+  if (!row) {
+    row = new Set();
+    visitedByV.set(v, row);
+  }
+  row.add(u);
+}
+
+function appendGreedyQuad(faceIndex, plane, u0, u1, v0, v1, positions, normals, indices) {
+  const face = voxelFaces[faceIndex];
+  const corners = greedyQuadCorners(faceIndex, plane, u0, u1, v0, v1);
+  const vertexOffset = positions.length / 3;
+  for (const corner of corners) {
+    positions.push(corner[0], corner[1], corner[2]);
+    normals.push(face.normal[0], face.normal[1], face.normal[2]);
+  }
+  indices.push(vertexOffset, vertexOffset + 1, vertexOffset + 2, vertexOffset, vertexOffset + 2, vertexOffset + 3);
+}
+
+function greedyQuadCorners(faceIndex, plane, u0, u1, v0, v1) {
+  switch (faceIndex) {
+    case 0:
+      return [
+        [plane, v1, u0],
+        [plane, v1, u1],
+        [plane, v0, u1],
+        [plane, v0, u0],
+      ];
+    case 1:
+      return [
+        [plane, v1, u1],
+        [plane, v1, u0],
+        [plane, v0, u0],
+        [plane, v0, u1],
+      ];
+    case 2:
+      return [
+        [u0, plane, v1],
+        [u1, plane, v1],
+        [u1, plane, v0],
+        [u0, plane, v0],
+      ];
+    case 3:
+      return [
+        [u0, plane, v0],
+        [u1, plane, v0],
+        [u1, plane, v1],
+        [u0, plane, v1],
+      ];
+    case 4:
+      return [
+        [u1, v1, plane],
+        [u0, v1, plane],
+        [u0, v0, plane],
+        [u1, v0, plane],
+      ];
+    default:
+      return [
+        [u0, v1, plane],
+        [u1, v1, plane],
+        [u1, v0, plane],
+        [u0, v0, plane],
+      ];
+  }
+}
+
+const voxelFaces = [
+  {
+    dx: 1,
+    dy: 0,
+    dz: 0,
+    normal: [1, 0, 0],
+    corners: [
+      [cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+      [cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+    ],
+  },
+  {
+    dx: -1,
+    dy: 0,
+    dz: 0,
+    normal: [-1, 0, 0],
+    corners: [
+      [-cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [-cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+      [-cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+      [-cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+    ],
+  },
+  {
+    dx: 0,
+    dy: 1,
+    dz: 0,
+    normal: [0, 1, 0],
+    corners: [
+      [-cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+      [-cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+    ],
+  },
+  {
+    dx: 0,
+    dy: -1,
+    dz: 0,
+    normal: [0, -1, 0],
+    corners: [
+      [-cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+      [-cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+    ],
+  },
+  {
+    dx: 0,
+    dy: 0,
+    dz: 1,
+    normal: [0, 0, 1],
+    corners: [
+      [cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [-cubeHalfSize, cubeHalfSize, cubeHalfSize],
+      [-cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, cubeHalfSize],
+    ],
+  },
+  {
+    dx: 0,
+    dy: 0,
+    dz: -1,
+    normal: [0, 0, -1],
+    corners: [
+      [-cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+      [cubeHalfSize, cubeHalfSize, -cubeHalfSize],
+      [cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+      [-cubeHalfSize, -cubeHalfSize, -cubeHalfSize],
+    ],
+  },
+];
+
+function isVoxelFaceOccluded(state, chunkMeshSolidKeys, occlusionMemo, surfaceAt, x, y, z) {
+  const key = blockKey(x, y, z);
+  if (state.removedBlocks.has(key)) return false;
+  if (chunkMeshSolidKeys.has(key)) return true;
+  const placedType = state.placedBlocks.get(key);
+  if (placedType && !isNonSolidVisualType(placedType)) return true;
+  if (occlusionMemo.has(key)) return occlusionMemo.get(key);
+  const occluded = y <= surfaceAt(x, z);
+  occlusionMemo.set(key, occluded);
+  return occluded;
 }
 
 export function createCloudSectorGroup({ THREE, sectorX, sectorZ, geometry, material }) {
@@ -217,24 +612,31 @@ export function createCloudSectorGroup({ THREE, sectorX, sectorZ, geometry, mate
 
   mesh.castShadow = false;
   mesh.receiveShadow = false;
-  mesh.frustumCulled = false;
+  updateInstancedMeshBounds(mesh);
+  mesh.frustumCulled = true;
   mesh.userData.blocks = Array.from({ length: lobes.length }, () => null);
   group.add(mesh);
   return group;
 }
 
-function exposedColumnStart(x, z, height, maxDepth = 5) {
+function updateInstancedMeshBounds(mesh) {
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingSphere?.();
+  mesh.computeBoundingBox?.();
+}
+
+function exposedColumnStart(x, z, height, maxDepth = 5, surfaceAt = (surfaceX, surfaceZ) => canonicalSurfaceHeightAt({ x: surfaceX, z: surfaceZ })) {
   const neighborFloor = Math.min(
-    terrainHeight(x + 1, z),
-    terrainHeight(x - 1, z),
-    terrainHeight(x, z + 1),
-    terrainHeight(x, z - 1),
-    terrainHeight(x + 1, z + 1),
-    terrainHeight(x - 1, z - 1),
-    terrainHeight(x + 1, z - 1),
-    terrainHeight(x - 1, z + 1),
+    surfaceAt(x + 1, z),
+    surfaceAt(x - 1, z),
+    surfaceAt(x, z + 1),
+    surfaceAt(x, z - 1),
+    surfaceAt(x + 1, z + 1),
+    surfaceAt(x - 1, z - 1),
+    surfaceAt(x + 1, z - 1),
+    surfaceAt(x - 1, z + 1),
   );
-  return Math.max(0, Math.min(height - maxDepth, neighborFloor + 1));
+  return Math.max(minBuildY, Math.min(height - maxDepth, neighborFloor + 1));
 }
 
 function isSurfaceSupportVisible(state, x, y, z) {
@@ -252,213 +654,8 @@ function subsurfaceType(surfaceType, y, height) {
   return "stone";
 }
 
-function canGrowTree(profile) {
-  return (
-    [WorldMapBlock.Grass, WorldMapBlock.Mud, WorldMapBlock.Snow, WorldMapBlock.FrozenSoil, WorldMapBlock.Stone].includes(profile.terrain) &&
-    profile.slope <= 3 &&
-    profile.height > 4 &&
-    profile.biome !== undefined
-  );
-}
-
 export function generatedBlockTypeAt(x, y, z) {
-  const treeType = generatedTreeBlockTypeAt(x, y, z);
-  if (treeType) return treeType;
-
-  const generated = getGeneratedBlock(x, y, z);
-  return renderTypeForBlock(generated?.vegetation ?? generated?.terrain ?? generated?.fluid) ?? null;
-}
-
-function generatedTreeBlockTypeAt(x, y, z) {
-  for (let treeZ = z - 4; treeZ <= z + 4; treeZ++) {
-    for (let treeX = x - 4; treeX <= x + 4; treeX++) {
-      const profile = terrainProfile(treeX, treeZ);
-      if (!canGrowTree(profile) || !isTreeCell(treeX, treeZ, profile)) continue;
-      const type = treeBlockTypeAt(treeX, profile.height + 1, treeZ, profile.tree, x, y, z);
-      if (type) return type;
-    }
-  }
-  return null;
-}
-
-function treeBlockTypeAt(treeX, baseY, treeZ, tree, x, y, z) {
-  if (tree.type === "pine") {
-    const trunkHeight = 5 + Math.floor(random2(treeX - 83, treeZ + 111) * 3);
-    if (x === treeX && z === treeZ && y >= baseY && y < baseY + trunkHeight) return tree.trunkType;
-
-    const top = baseY + trunkHeight;
-    if (leafLayerContains(treeX, top - 4, treeZ, x, y, z, 2, 0.62)) return tree.leafType;
-    if (leafLayerContains(treeX, top - 3, treeZ, x, y, z, 2, 0.74)) return tree.leafType;
-    if (leafLayerContains(treeX, top - 2, treeZ, x, y, z, 1, 0.86)) return tree.leafType;
-    if (leafLayerContains(treeX, top - 1, treeZ, x, y, z, 1, 0.72)) return leafAccentType(tree.leafType, treeX - 5, treeZ + 13);
-    if (leafLayerContains(treeX, top, treeZ, x, y, z, 1, 0.54)) return tree.leafType;
-    if (x === treeX && y === top + 1 && z === treeZ) return tree.leafType;
-    return null;
-  }
-
-  const trunkHeight = 4 + Math.floor(random2(treeX + 101, treeZ - 71) * 3);
-  if (x === treeX && z === treeZ && y >= baseY && y < baseY + trunkHeight) return tree.trunkType;
-
-  const top = baseY + trunkHeight;
-  if (leafLayerContains(treeX, top - 2, treeZ, x, y, z, 2, 0.68)) return tree.leafType;
-  if (leafLayerContains(treeX, top - 1, treeZ, x, y, z, 2, 0.84)) return tree.leafType;
-  if (leafLayerContains(treeX, top, treeZ, x, y, z, 2, 0.58)) return leafAccentType(tree.leafType, treeX, treeZ);
-  if (leafLayerContains(treeX, top + 1, treeZ, x, y, z, 1, 0.76)) return leafAccentType(tree.leafType, treeX + 7, treeZ - 11);
-  return leafLobeBlockTypeAt(treeX, top - 1, treeZ, tree.leafType, x, y, z);
-}
-
-function leafLobeBlockTypeAt(treeX, y, treeZ, leafType, x, targetY, z) {
-  const lobeCount = 2 + Math.floor(random2(treeX - 127, treeZ + 149) * 3);
-  const accent = leafAccentType(leafType, treeX + 17, treeZ - 19);
-  for (let i = 0; i < lobeCount; i++) {
-    const angle = random2(treeX + i * 37, treeZ - i * 41) * Math.PI * 2;
-    const offset = 1 + Math.floor(random2(treeX - i * 43, treeZ + i * 47) * 2);
-    const lx = treeX + Math.round(Math.cos(angle) * offset);
-    const lz = treeZ + Math.round(Math.sin(angle) * offset);
-    const ly = y + Math.floor(random2(treeX + i * 53, treeZ - i * 59) * 2);
-    const type = i % 2 === 0 ? leafType : accent;
-    if (leafLayerContains(lx, ly, lz, x, targetY, z, 1, 0.62)) return type;
-  }
-  return null;
-}
-
-function leafLayerContains(centerX, centerY, centerZ, x, y, z, radius, density) {
-  if (y !== centerY) return false;
-  const dx = x - centerX;
-  const dz = z - centerZ;
-  if (Math.abs(dx) > radius || Math.abs(dz) > radius) return false;
-  const distance = Math.abs(dx) + Math.abs(dz);
-  const corner = Math.abs(dx) === radius && Math.abs(dz) === radius;
-  const edge = Math.max(Math.abs(dx), Math.abs(dz)) === radius;
-  const roll = random2(centerX + dx * 23 + centerY * 5, centerZ + dz * 29 - centerY * 7);
-  if (corner && roll < 0.7) return false;
-  if (distance > radius + 1 && roll < 0.48) return false;
-  if (edge && roll > density) return false;
-  return true;
-}
-
-function addTreeMatrices(state, matrices, x, y, z, tree, transform, rotation, scale, THREE, solidKeys) {
-  if (tree.type === "pine") {
-    addPineTreeMatrices(state, matrices, x, y, z, tree, transform, rotation, scale, THREE, solidKeys);
-    return;
-  }
-
-  const trunkHeight = 4 + Math.floor(random2(x + 101, z - 71) * 3);
-  for (let i = 0; i < trunkHeight; i++) {
-    pushBlock(state, matrices[tree.trunkType], tree.trunkType, x, y + i, z, transform, rotation, scale, THREE, solidKeys);
-  }
-
-  const top = y + trunkHeight;
-  addTreeRoots(matrices, x, y, z, tree.trunkType, transform, THREE, 2);
-  addBranches(matrices, x, y + Math.max(2, trunkHeight - 2), z, tree.trunkType, transform, THREE);
-  addLeafLayer(state, matrices, x, top - 2, z, 2, 0.68, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top - 1, z, 2, 0.84, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top, z, 2, 0.58, leafAccentType(tree.leafType, x, z), transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top + 1, z, 1, 0.76, leafAccentType(tree.leafType, x + 7, z - 11), transform, rotation, scale, THREE, solidKeys);
-  addLeafLobes(state, matrices, x, top - 1, z, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-}
-
-function addDistantTreeMatrices(state, matrices, x, y, z, tree, transform, rotation, scale, THREE, solidKeys) {
-  const trunkHeight = tree.type === "pine" ? 4 : 3;
-  for (let i = 0; i < trunkHeight; i++) {
-    pushBlock(state, matrices[tree.trunkType], tree.trunkType, x, y + i, z, transform, rotation, scale, THREE, solidKeys);
-  }
-
-  const top = y + trunkHeight;
-  if (tree.type === "pine") {
-    addDistantLeafCross(state, matrices, x, top - 2, z, tree.leafType, 1, transform, rotation, scale, THREE, solidKeys);
-    addDistantLeafCross(state, matrices, x, top - 1, z, tree.leafType, 1, transform, rotation, scale, THREE, solidKeys);
-    pushBlock(state, matrices[tree.leafType], tree.leafType, x, top, z, transform, rotation, scale, THREE, solidKeys);
-    return;
-  }
-
-  addDistantLeafCross(state, matrices, x, top - 1, z, tree.leafType, 1, transform, rotation, scale, THREE, solidKeys);
-  addDistantLeafCross(state, matrices, x, top, z, leafAccentType(tree.leafType, x, z), 1, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[tree.leafType], tree.leafType, x, top + 1, z, transform, rotation, scale, THREE, solidKeys);
-}
-
-function addDistantLeafCross(state, matrices, x, y, z, leafType, radius, transform, rotation, scale, THREE, solidKeys) {
-  pushBlock(state, matrices[leafType], leafType, x, y, z, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[leafType], leafType, x + radius, y, z, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[leafType], leafType, x - radius, y, z, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[leafType], leafType, x, y, z + radius, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[leafType], leafType, x, y, z - radius, transform, rotation, scale, THREE, solidKeys);
-}
-
-function addPineTreeMatrices(state, matrices, x, y, z, tree, transform, rotation, scale, THREE, solidKeys) {
-  const trunkHeight = 5 + Math.floor(random2(x - 83, z + 111) * 3);
-  for (let i = 0; i < trunkHeight; i++) {
-    pushBlock(state, matrices[tree.trunkType], tree.trunkType, x, y + i, z, transform, rotation, scale, THREE, solidKeys);
-  }
-
-  const top = y + trunkHeight;
-  addTreeRoots(matrices, x, y, z, tree.trunkType, transform, THREE, 1);
-  addBranches(matrices, x, y + Math.max(2, trunkHeight - 3), z, tree.trunkType, transform, THREE);
-  addLeafLayer(state, matrices, x, top - 4, z, 2, 0.62, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top - 3, z, 2, 0.74, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top - 2, z, 1, 0.86, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top - 1, z, 1, 0.72, leafAccentType(tree.leafType, x - 5, z + 13), transform, rotation, scale, THREE, solidKeys);
-  addLeafLayer(state, matrices, x, top, z, 1, 0.54, tree.leafType, transform, rotation, scale, THREE, solidKeys);
-  pushBlock(state, matrices[tree.leafType], tree.leafType, x, top + 1, z, transform, rotation, scale, THREE, solidKeys);
-}
-
-function addLeafLayer(state, matrices, x, y, z, radius, density, leafType, transform, rotation, scale, THREE, solidKeys) {
-  for (let dz = -radius; dz <= radius; dz++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      const distance = Math.abs(dx) + Math.abs(dz);
-      const corner = Math.abs(dx) === radius && Math.abs(dz) === radius;
-      const edge = Math.max(Math.abs(dx), Math.abs(dz)) === radius;
-      const roll = random2(x + dx * 23 + y * 5, z + dz * 29 - y * 7);
-      if (corner && roll < 0.7) continue;
-      if (distance > radius + 1 && roll < 0.48) continue;
-      if (edge && roll > density) continue;
-      pushBlock(state, matrices[leafType], leafType, x + dx, y, z + dz, transform, rotation, scale, THREE, solidKeys);
-    }
-  }
-}
-
-function addLeafLobes(state, matrices, x, y, z, leafType, transform, rotation, scale, THREE, solidKeys) {
-  const lobeCount = 2 + Math.floor(random2(x - 127, z + 149) * 3);
-  const accent = leafAccentType(leafType, x + 17, z - 19);
-  for (let i = 0; i < lobeCount; i++) {
-    const angle = random2(x + i * 37, z - i * 41) * Math.PI * 2;
-    const offset = 1 + Math.floor(random2(x - i * 43, z + i * 47) * 2);
-    const lx = x + Math.round(Math.cos(angle) * offset);
-    const lz = z + Math.round(Math.sin(angle) * offset);
-    const ly = y + Math.floor(random2(x + i * 53, z - i * 59) * 2);
-    addLeafLayer(state, matrices, lx, ly, lz, 1, 0.62, i % 2 === 0 ? leafType : accent, transform, rotation, scale, THREE, solidKeys);
-  }
-}
-
-function addBranches(matrices, x, y, z, trunkType, transform, THREE) {
-  const count = 2 + Math.floor(random2(x + 211, z - 233) * 2);
-  for (let i = 0; i < count; i++) {
-    const yaw = Math.round(random2(x + i * 67, z - i * 71) * 3) * (Math.PI / 2);
-    const length = 0.58 + random2(x - i * 79, z + i * 83) * 0.34;
-    const px = x + Math.sin(yaw) * 0.34;
-    const pz = z + Math.cos(yaw) * 0.34;
-    pushDecorationOrientedBox(matrices[trunkType], px, y + i * 0.34, pz, transform, THREE, 0.18, 0.18, length, yaw);
-  }
-}
-
-function addTreeRoots(matrices, x, y, z, trunkType, transform, THREE, extraCount = 0) {
-  const count = 2 + extraCount + Math.floor(random2(x - 271, z + 281) * 2);
-  for (let i = 0; i < count; i++) {
-    const yaw = (Math.round(random2(x + i * 89, z - i * 97) * 4) * Math.PI) / 2 + random2(x - i * 101, z + i * 103) * 0.35;
-    const length = 0.52 + random2(x + i * 107, z - i * 109) * 0.36;
-    const px = x + Math.sin(yaw) * (0.24 + length * 0.28);
-    const pz = z + Math.cos(yaw) * (0.24 + length * 0.28);
-    pushDecorationOrientedBox(matrices[trunkType], px, y + 0.12, pz, transform, THREE, 0.16, 0.14, length, yaw);
-  }
-}
-
-function leafAccentType(leafType, x, z) {
-  if (leafType === "snowLeaves") return random2(x + 307, z - 311) > 0.5 ? "snowLeaves" : "pineLeaves";
-  if (leafType === "pineLeaves") return random2(x + 313, z - 317) > 0.5 ? "leavesTeal" : "pineLeaves";
-  if (leafType === "leavesDark") return random2(x + 331, z - 337) > 0.5 ? "leaves" : "leavesTeal";
-  if (leafType === "leavesLight") return random2(x + 347, z - 349) > 0.5 ? "leavesWarm" : "leaves";
-  if (leafType === "leavesWarm") return random2(x + 353, z - 359) > 0.5 ? "leavesLight" : "leaves";
-  return random2(x + 367, z - 373) > 0.5 ? "leavesLight" : "leavesDark";
+  return canonicalRenderTypeAt({ x, y, z }) ?? null;
 }
 
 function addVegetationDecoration(matrices, x, height, z, vegetation, transform, rotation, scale, THREE) {
@@ -795,28 +992,9 @@ function isNearLand(x, z) {
 }
 
 function hasSurfaceWater(x, z) {
-  const profile = terrainProfile(x, z);
-  return (
-    profile.height < seaLevel ||
-    profile.fluid === WorldMapBlock.Water ||
-    profile.fluid === WorldMapBlock.SwampWater ||
-    profile.fluid === WorldMapBlock.ToxicWater ||
-    profile.fluid === WorldMapBlock.Ice
-  );
-}
-
-function isTreeCell(x, z, profile) {
-  const density = treeDensityAt(x, z);
-  if (density <= 0) return false;
-  const cellSize = density > 0.62 ? 7 : 9;
-  const cellX = Math.floor(x / cellSize);
-  const cellZ = Math.floor(z / cellSize);
-  const originX = cellX * cellSize;
-  const originZ = cellZ * cellSize;
-  const inner = Math.max(1, cellSize - 2);
-  const treeX = originX + 1 + Math.floor(random2(cellX + 19, cellZ - 31) * inner);
-  const treeZ = originZ + 1 + Math.floor(random2(cellX - 41, cellZ + 53) * inner);
-  return x === treeX && z === treeZ && random2(cellX + 71, cellZ - 83) < density * 0.72 && canGrowTree(profile);
+  const surface = canonicalSurfaceHeightAt({ x, z });
+  const waterLevel = canonicalWaterLevelAt({ x, z, surface });
+  return waterLevel !== null && surface < waterLevel;
 }
 
 function randomOffset(x, z, salt) {
@@ -858,15 +1036,33 @@ function addCloudCluster(lobes, seedX, seedZ) {
   }
 }
 
-function pushBlock(state, list, type, x, y, z, transform, rotation, scale, THREE, solidKeys) {
+function pushBlock(state, list, type, x, y, z, transform, rotation, scale, THREE, solidKeys, canonicalize = true) {
+  if (canonicalize) {
+    const canonicalType = canonicalRenderTypeAt({ x, y, z });
+    if (!canonicalType) return;
+    type = canonicalType;
+  }
   const key = blockKey(x, y, z);
   if (state.removedBlocks.has(key)) return;
   if (!isNonSolidVisualType(type)) trackGeneratedSolidKey(state, solidKeys, key);
   const visualY = isShortWaterVisualType(type) ? y + waterVisualCenterOffset : y;
   const visualScale = isShortWaterVisualType(type) ? new THREE.Vector3(1, waterVisualHeightScale, 1) : scale;
+  const block = { x, y, z, type, key };
+  if (isMeshableVoxelType(type)) {
+    list.push({
+      x,
+      y,
+      z,
+      type,
+      block,
+      tint: blockTint(type, x, y, z),
+      meshable: true,
+    });
+    return;
+  }
   list.push({
     matrix: composeMatrix(x, visualY, z, transform, rotation, visualScale, THREE),
-    block: { x, y, z, type, key },
+    block,
     tint: blockTint(type, x, y, z),
   });
 }
@@ -877,6 +1073,10 @@ function isNonSolidVisualType(type) {
 
 function isShortWaterVisualType(type) {
   return type === "water" || type === "swampWater" || type === "toxicWater";
+}
+
+function isMeshableVoxelType(type) {
+  return !isNonSolidVisualType(type) && type !== "lava";
 }
 
 function trackGeneratedSolidKey(state, solidKeys, key) {
@@ -1052,11 +1252,15 @@ export function blockTint(type, x, y, z) {
     shade = 0.92 + tone * 0.08;
     warm = 0.86 + fleck * 0.04;
     cool = 1.02 + tone * 0.06;
-  } else if (type === "stone" || type === "deepStone" || type === "gravel" || type === "basalt" || type === "ash" || type === "bedrock") {
+  } else if (type === "stone" || type === "deepStone" || type === "coal" || type === "gravel" || type === "basalt" || type === "ash" || type === "bedrock") {
     shade = 0.93 + tone * 0.11;
     warm = 0.97 + fleck * 0.035;
     cool = 0.97 + tone * 0.06;
-    if (type === "deepStone") {
+    if (type === "coal") {
+      shade = 0.78 + tone * 0.08;
+      warm = 0.82 + fleck * 0.03;
+      cool = 0.88 + tone * 0.05;
+    } else if (type === "deepStone") {
       warm = 0.86 + fleck * 0.03;
       cool = 1.06 + tone * 0.08;
     } else if (type === "basalt" || type === "bedrock") {

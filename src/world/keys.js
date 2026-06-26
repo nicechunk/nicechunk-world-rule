@@ -7,5 +7,12 @@ export function chunkKey(x, z) {
 }
 
 export function parseCellKey(key) {
-  return key.split(",").map(Number);
+  const firstComma = key.indexOf(",");
+  const secondComma = key.indexOf(",", firstComma + 1);
+  if (firstComma < 0 || secondComma < 0) return [NaN, NaN, NaN];
+  return [
+    Number(key.slice(0, firstComma)),
+    Number(key.slice(firstComma + 1, secondComma)),
+    Number(key.slice(secondComma + 1)),
+  ];
 }

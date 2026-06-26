@@ -19,6 +19,7 @@ export const materialStyles = {
   quicksand: 18,
   deepStone: 19,
   bedrock: 20,
+  coal: 21,
 };
 
 export function applyVoxelMaterialDetail(material, style, seed = 0) {
@@ -251,11 +252,18 @@ vec3 applyProcVoxelDetail(vec3 color) {
     color = procTint(color, vec3(0.56, 0.62, 0.76), sideFace * broadLayer * 0.2 + deepVein * 0.1);
     color = procTint(color, vec3(1.16, 1.2, 1.18), glimmer * 0.08);
     color = procTint(color, vec3(0.46, 0.48, 0.56), lowerSide * 0.12);
-  } else {
+  } else if (uProcStyle < 20.5) {
     float hardEdge = procEdge(faceUv * 0.68 + cell.xz * 0.02, 0.052);
     float blackFleck = step(0.84, procHash(floor(faceUv * 4.0) + cell.xz * 0.44));
     color = procTint(color, vec3(0.38, 0.38, 0.44), hardEdge * 0.18 + blackFleck * 0.1);
     color = procTint(color, vec3(0.82, 0.82, 0.9), topFace * bevelHighlight * 0.06);
+  } else {
+    float seam = smoothstep(0.43, 0.52, fract((faceUv.x * 0.38 + faceUv.y * 0.71 + cellTone) * 3.0));
+    float gloss = step(0.94, procHash(floor(faceUv * 5.0) + cell.xz * 0.37 + cell.y * 0.19));
+    float fracture = step(0.9, procHash(floor(faceUv * vec2(3.0, 6.0)) + cell.zy * 0.23));
+    color = procTint(color, vec3(0.42, 0.4, 0.38), seam * 0.18 + sideFace * broadLayer * 0.12);
+    color = procTint(color, vec3(1.32, 1.24, 1.08), gloss * 0.16 + topFace * bevelHighlight * 0.08);
+    color = procTint(color, vec3(0.24, 0.22, 0.2), fracture * 0.2 + lowerSide * 0.16);
   }
 
   return color;
