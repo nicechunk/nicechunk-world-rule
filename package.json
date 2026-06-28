@@ -6,13 +6,14 @@
   "type": "module",
   "scripts": {
     "audit:deps": "node scripts/audit-dependencies.mjs",
+    "audit:licenses": "node scripts/audit-licenses.mjs",
     "build": "vite build",
     "build:nginx": "vite build",
     "dev": "vite --host 0.0.0.0",
     "preview": "vite preview --host 0.0.0.0",
     "test:core": "node --loader ts-node/esm node_modules/mocha/bin/mocha -t 1000000 tests/**/*.ts",
     "validate:core": "npm run test:core",
-    "validate:release": "npm run audit:deps && npm run test:core && npm run build"
+    "validate:release": "npm run audit:deps && npm run audit:licenses && npm run test:core && npm run build"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
