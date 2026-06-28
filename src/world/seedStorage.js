@@ -1,4 +1,4 @@
-export const defaultWorldSeed = "nicechunk-mainnet-001";
+export const defaultWorldSeed = "ba1a9d446157c537af58fc5ff53a28422cdc6ab3dd88daa24095db3bd9c0f041";
 
 const playWorldSeedStorageKey = "nicechunk.play.worldSeed.v1";
 const worldConfigStorageKey = "nicechunk.worldConfig.v1";

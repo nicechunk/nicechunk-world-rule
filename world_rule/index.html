@@ -63,6 +63,10 @@
             <span class="hud-label" data-wr-i18n="preview.heading">WORLD PREVIEW</span>
             <strong id="previewSeedLabel">nicechunk-mainnet-001</strong>
           </div>
+          <div class="preview-coordinate-readout" aria-label="Current coordinates" data-wr-i18n-aria-label="preview.coordinatesLabel">
+            <span class="hud-label" data-wr-i18n="preview.coordinates">Coordinates</span>
+            <strong id="previewCoordinates">X 0.0  Y 0.0  Z 0.0</strong>
+          </div>
           <span id="previewStats">0 chunks</span>
         </div>
         <div class="preview-hud preview-hud-bottom" aria-hidden="true">
@@ -77,7 +81,7 @@
         </div>
       </section>
 
-      <aside class="algorithm-pane" aria-labelledby="pageTitle">
+      <aside id="algorithmPane" class="algorithm-pane" aria-labelledby="pageTitle">
         <div class="algorithm-scroll">
           <header class="rule-header">
             <p class="eyebrow" data-wr-i18n="header.eyebrow">PUBLIC GENERATION SPEC</p>
@@ -146,6 +150,17 @@
           <section class="rule-list" id="ruleList" aria-label="Generation rules" data-wr-i18n-aria-label="rules.label"></section>
         </div>
       </aside>
+      <button
+        id="algorithmToggle"
+        class="algorithm-toggle"
+        type="button"
+        aria-controls="algorithmPane"
+        aria-expanded="true"
+        aria-label="Toggle algorithm panel"
+        data-wr-i18n-aria-label="algorithm.toggleLabel"
+      >
+        <span data-wr-i18n="algorithm.collapse">Collapse rules</span>
+      </button>
     </main>
 
     <script type="module" src="./world_rule.js"></script>

@@ -1,12 +1,13 @@
 import { landBaseHeight, seaLevel } from "./config.js";
 import { BiomeType, WorldMapBlock, renderTypeForBlock } from "./blocks.js";
+import { defaultWorldSeed } from "./seedStorage.js";
 
 const profileCache = new Map();
 const heightCache = new Map();
 const rawHeightCache = new Map();
 const baseHeightCache = new Map();
 const mountainCellCache = new Map();
-let worldSeed = hashSeed("nicechunk-mainnet-001");
+let worldSeed = hashSeed(defaultWorldSeed);
 export const bedrockMaxY = 0;
 export const deepStoneStartY = 45;
 export const maxVisualWaterDepth = 4;

@@ -1,12 +1,13 @@
 import * as THREE from "three";
 import "../src/site-header.css";
 import { finishSiteLoading, setSiteLoadingProgress } from "../src/site-ui.js";
-import { chunkSize } from "../src/world/config.js";
+import { applyWorldConfigFromChain, chunkSize } from "../src/world/config.js";
 import { currentWorldSeed, getGeneratedBlock, setWorldSeed, terrainProfile } from "../src/world/generator.js";
+import { setCanonicalWorldConfig } from "../src/world/canonicalResource.js";
 import { createWorldState } from "../src/world/state.js";
 import { createChunkGroup } from "../src/world/chunks.js";
 import { chunkKey } from "../src/world/keys.js";
-import { defaultWorldSeed, normalizeSeed, readPlayWorldSeed } from "../src/world/seedStorage.js";
+import { defaultWorldSeed, normalizeSeed, persistPlayWorldSeed, readPlayWorldSeed } from "../src/world/seedStorage.js";
 import {
   updateProceduralMaterialSeed,
   updateProceduralMaterialTime,
@@ -21,11 +22,17 @@ const randomSeedButton = document.querySelector("#randomSeed");
 const renderSeedButton = document.querySelector("#renderSeed");
 const previewStats = document.querySelector("#previewStats");
 const previewSeedLabel = document.querySelector("#previewSeedLabel");
+const previewCoordinates = document.querySelector("#previewCoordinates");
+const algorithmLayout = document.querySelector(".world-algorithm-layout");
+const algorithmPane = document.querySelector("#algorithmPane");
+const algorithmToggle = document.querySelector("#algorithmToggle");
 const ruleList = document.querySelector("#ruleList");
 const pipelineList = document.querySelector("#pipelineList");
 const biomeStrip = document.querySelector("#biomeStrip");
 const seedStorageKey = "nicechunk.worldRule.seed";
 const previewViewStorageKey = "nicechunk.worldRule.view.v1";
+const algorithmCollapsedStorageKey = "nicechunk.worldRule.algorithmCollapsed.v1";
+const previewViewVersion = 2;
 const previewRenderDistance = 6;
 const previewDetailRenderDistance = 1;
 const previewPreloadDistance = previewRenderDistance + 3;
@@ -83,6 +90,7 @@ let dragging = false;
 let lastPointerX = 0;
 let lastPointerY = 0;
 let lastViewSaveAt = 0;
+let lastPreviewCoordinateText = "";
 
 const keys = new Set();
 const clock = new THREE.Clock();
@@ -93,32 +101,51 @@ setSiteLoadingProgress(28);
 await initWorldRuleI18n();
 setSiteLoadingProgress(54);
 renderRules();
-seedInput.value = initialWorldRuleSeed();
+const startupSeed = initialWorldRuleSeed();
+seedInput.value = startupSeed;
 applySeed(seedInput.value);
+setAlgorithmPaneCollapsed(loadAlgorithmCollapsedState(), false);
 resize();
+updatePreviewCoordinates();
 animate();
 finishSiteLoading();
+syncSeedFromPlayWorldConfig(startupSeed);
 
 window.addEventListener("resize", resize);
 window.addEventListener("beforeunload", () => savePreviewView(true));
 window.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") savePreviewView(true);
 });
-window.addEventListener("keydown", (event) => keys.add(event.code));
-window.addEventListener("keyup", (event) => keys.delete(event.code));
+window.addEventListener("keydown", (event) => {
+  if (isEditableKeyboardTarget(event.target)) return;
+  keys.add(event.code);
+});
+window.addEventListener("keyup", (event) => {
+  if (isEditableKeyboardTarget(event.target)) return;
+  keys.delete(event.code);
+});
 canvas.addEventListener("pointerdown", handlePointerDown);
 canvas.addEventListener("pointermove", handlePointerMove);
 canvas.addEventListener("pointerup", handlePointerUp);
 canvas.addEventListener("pointercancel", handlePointerUp);
-renderSeedButton.addEventListener("click", () => applySeed(seedInput.value));
+renderSeedButton.addEventListener("click", () => submitSeedInput());
 randomSeedButton.addEventListener("click", () => {
   seedInput.value = randomSeed();
-  applySeed(seedInput.value);
+  submitSeedInput();
+});
+algorithmToggle?.addEventListener("click", () => {
+  setAlgorithmPaneCollapsed(!algorithmLayout?.classList.contains("algorithm-collapsed"));
 });
 seedInput.addEventListener("keydown", (event) => {
-  if (event.code === "Enter") applySeed(seedInput.value);
+  if (event.code !== "Enter") return;
+  event.preventDefault();
+  submitSeedInput();
 });
-window.addEventListener("nicechunk:worldrulelanguagechange", renderRules);
+window.addEventListener("nicechunk:worldrulelanguagechange", () => {
+  renderRules();
+  updateAlgorithmToggleText();
+  updatePreviewCoordinates(true);
+});
 
 function applySeed(seed) {
   const nextSeed = normalizeSeed(seed);
@@ -126,21 +153,16 @@ function applySeed(seed) {
   if (previewSeedLabel) previewSeedLabel.textContent = nextSeed;
   localStorage.setItem(seedStorageKey, nextSeed);
   setWorldSeed(nextSeed);
+  setCanonicalWorldConfig({ worldSeedHex: nextSeed });
   updateProceduralMaterialSeed(materials, currentWorldSeed());
   clearWorld();
   worldState = createWorldState();
   const focused = previewFocusFromUrl();
   const saved = focused ? null : loadSavedPreviewView(nextSeed);
-  const start = saved?.position ?? focused ?? findPreviewStart();
-  camera.position.set(start.x, start.y + 14, start.z + 18);
-  if (saved) {
-    camera.position.set(saved.position.x, saved.position.y, saved.position.z);
-    yaw = saved.yaw;
-    pitch = saved.pitch;
-  } else {
-    yaw = Math.PI * 0.25;
-    pitch = -0.38;
-  }
+  const start = saved?.position ?? focused ?? defaultPreviewStart();
+  camera.position.set(start.x, start.y, start.z);
+  yaw = saved?.yaw ?? Math.PI * 0.25;
+  pitch = saved?.pitch ?? -0.38;
   updateCameraRotation();
   pendingChunkKeys = [];
   pendingPreloadChunkKeys = [];
@@ -150,26 +172,63 @@ function applySeed(seed) {
 }
 
 function initialWorldRuleSeed() {
-  return readPlayWorldSeed() ?? localStorage.getItem(seedStorageKey) ?? defaultWorldSeed;
+  return readPlayWorldSeed() ?? defaultWorldSeed;
 }
 
-function findPreviewStart() {
-  let best = { x: 0, y: terrainProfile(0, 0).height + 1, z: 0 };
-  let bestScore = -Infinity;
-  for (let z = -48; z <= 48; z++) {
-    for (let x = -48; x <= 48; x++) {
-      const profile = terrainProfile(x, z);
-      const open = profile.forest < 0.45 ? 8 : -4;
-      const elevation = Math.min(profile.height, 24) * 0.25;
-      const slope = Math.max(0, 8 - profile.slope * 2);
-      const score = open + elevation + slope - Math.hypot(x, z) * 0.035;
-      if (score > bestScore) {
-        bestScore = score;
-        best = { x, y: profile.height + 1, z };
-      }
-    }
+async function syncSeedFromPlayWorldConfig(startupSeed) {
+  const chainSeed = await loadPlayWorldSeedFromChain();
+  if (!chainSeed) return;
+  if (normalizeSeed(seedInput.value) !== normalizeSeed(startupSeed)) return;
+  if (normalizeSeed(seedInput.value) === chainSeed) return;
+  seedInput.value = chainSeed;
+  applySeed(chainSeed);
+}
+
+async function loadPlayWorldSeedFromChain() {
+  try {
+    const { loadGlobalConfig } = await import("../src/chain/nicechunkChain.js");
+    const config = await withTimeout(loadGlobalConfig(), 8000, "world-rule-global-config");
+    applyWorldConfigFromChain(config);
+    setCanonicalWorldConfig(config);
+    const seed = config.worldSeedHex ?? bytesToHex(config.worldSeed);
+    if (!seed) return null;
+    persistPlayWorldSeed(seed);
+    return normalizeSeed(seed);
+  } catch (error) {
+    console.warn("Failed to load NiceChunk world config for world rule preview", error);
+    return null;
   }
-  return best;
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timeoutId = 0;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  });
+}
+
+function bytesToHex(value) {
+  if (!value) return "";
+  return Array.from(value, (byte) => Number(byte).toString(16).padStart(2, "0")).join("");
+}
+
+function submitSeedInput() {
+  applySeed(seedInput.value);
+  seedInput.blur();
+  keys.clear();
+}
+
+function isEditableKeyboardTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
+}
+
+function defaultPreviewStart() {
+  return { x: 0, y: terrainProfile(0, 0).height + 15, z: 0 };
 }
 
 function previewFocusFromUrl() {
@@ -182,7 +241,7 @@ function previewFocusFromUrl() {
   if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
   const cellX = Math.round(x);
   const cellZ = Math.round(z);
-  return { x: cellX, y: terrainProfile(cellX, cellZ).height + 1, z: cellZ };
+  return { x: cellX, y: terrainProfile(cellX, cellZ).height + 15, z: cellZ };
 }
 
 function clearWorld() {
@@ -205,6 +264,7 @@ function animate() {
   generateAroundCamera();
   buildPendingChunks();
   savePreviewView();
+  updatePreviewCoordinates();
   renderer.render(scene, camera);
 }
 
@@ -212,7 +272,7 @@ function updateFlight(dt) {
   const forward = new THREE.Vector3();
   camera.getWorldDirection(forward);
   forward.normalize();
-  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize().multiplyScalar(-1);
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
   const up = new THREE.Vector3(0, 1, 0);
   const direction = new THREE.Vector3();
 
@@ -546,6 +606,55 @@ function moveCameraToCave(cave) {
   pendingPreloadChunkKeys = [];
   pendingChunkRefreshKeys = [];
   savePreviewView(true);
+  updatePreviewCoordinates(true);
+}
+
+function updatePreviewCoordinates(force = false) {
+  if (!previewCoordinates) return;
+  const text = worldRuleT("preview.coordinatesValue", {
+    x: formatCoordinate(camera.position.x),
+    y: formatCoordinate(camera.position.y),
+    z: formatCoordinate(camera.position.z),
+  });
+  if (!force && text === lastPreviewCoordinateText) return;
+  lastPreviewCoordinateText = text;
+  previewCoordinates.textContent = text;
+}
+
+function formatCoordinate(value) {
+  return Number(value).toFixed(1);
+}
+
+function loadAlgorithmCollapsedState() {
+  try {
+    return localStorage.getItem(algorithmCollapsedStorageKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setAlgorithmPaneCollapsed(collapsed, persist = true) {
+  if (!algorithmLayout) return;
+  algorithmLayout.classList.toggle("algorithm-collapsed", collapsed);
+  algorithmPane?.setAttribute("aria-hidden", String(collapsed));
+  algorithmToggle?.setAttribute("aria-expanded", String(!collapsed));
+  updateAlgorithmToggleText(collapsed);
+  if (persist) {
+    try {
+      localStorage.setItem(algorithmCollapsedStorageKey, collapsed ? "1" : "0");
+    } catch {
+      // Ignore storage failures; the panel should still respond for this session.
+    }
+  }
+  requestAnimationFrame(resize);
+}
+
+function updateAlgorithmToggleText(collapsed = algorithmLayout?.classList.contains("algorithm-collapsed") ?? false) {
+  if (!algorithmToggle) return;
+  const label = worldRuleT(collapsed ? "algorithm.expand" : "algorithm.collapse");
+  const labelNode = algorithmToggle.querySelector("span");
+  if (labelNode) labelNode.textContent = label;
+  algorithmToggle.title = label;
 }
 
 function handlePointerDown(event) {
@@ -584,7 +693,7 @@ function updateCameraRotation() {
 function loadSavedPreviewView(seed) {
   try {
     const saved = JSON.parse(localStorage.getItem(previewViewStorageKey) || "null");
-    if (!saved || saved.seed !== seed) return null;
+    if (!saved || saved.version !== previewViewVersion || saved.seed !== seed) return null;
     const position = saved.position;
     if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) return null;
     const savedYaw = Number(saved.yaw);
@@ -608,7 +717,7 @@ function savePreviewView(force = false) {
     localStorage.setItem(
       previewViewStorageKey,
       JSON.stringify({
-        version: 1,
+        version: previewViewVersion,
         seed: seedInput.value,
         position: {
           x: Number(camera.position.x.toFixed(3)),

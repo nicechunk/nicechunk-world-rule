@@ -24,7 +24,7 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
   group.userData.detailMode = detailMode;
   group.userData.solidKeys = new Set();
   const fullDetail = detailMode === "full";
-  const decorationDetail = detailMode === "full" || detailMode === "decorated";
+  const decorationDetail = detailMode !== "surface";
   const treeDetail = detailMode !== "surface";
   const castChunkShadows = chunkDetailCastsShadows(detailMode);
   const receiveChunkShadows = chunkDetailReceivesShadows(detailMode);
@@ -119,6 +119,18 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     mushroom: 1,
     fallenLog: 2,
   };
+  const vegetationBudget = {
+    bush: 2,
+    cactus: 3,
+    reed: 4,
+    vine: 2,
+    groundPatch: 4,
+    coral: 2,
+    tuft: 6,
+    mushroom: 1,
+    large: 1,
+    thorn: 2,
+  };
 
   const sourceFluidCells = new Map();
   for (let localZ = 0; localZ < chunkSize; localZ++) {
@@ -158,7 +170,12 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
 
       if (decorationDetail && surfaceSupportVisible && !underCanonicalWater) {
         const profile = terrainProfile(x, z);
-        if (!canonicalAboveSurface && profile.vegetation && height > 3) {
+        if (
+          !canonicalAboveSurface &&
+          profile.vegetation &&
+          height > 3 &&
+          shouldPlaceVegetationDecoration(vegetationBudget, profile.vegetation, x, z)
+        ) {
           addVegetationDecoration(matrices, x, height, z, profile.vegetation, transform, rotation, scale, THREE);
         }
 
@@ -229,6 +246,7 @@ export function createChunkGroup({ THREE, chunkX, chunkZ, state, geometryByType,
     updateInstancedMeshBounds(mesh);
     if (!interactive) mesh.raycast = () => {};
     mesh.userData.blocks = interactive ? instanceEntries.map((entry) => entry.block) : [];
+    mesh.userData.meshType = type;
     group.add(mesh);
   }
 
@@ -725,6 +743,42 @@ function addVegetationDecoration(matrices, x, height, z, vegetation, transform, 
   addTuft(matrices[type], x, height, z, transform, THREE, 0.46, 0.34);
 }
 
+function shouldPlaceVegetationDecoration(budget, vegetation, x, z) {
+  const category = vegetationDecorationCategory(vegetation);
+  if ((budget[category] ?? 0) <= 0) return false;
+  if (random2(x + 2309, z - 2311) >= vegetationDecorationChance(category)) return false;
+  budget[category]--;
+  return true;
+}
+
+function vegetationDecorationCategory(vegetation) {
+  if (vegetation === WorldMapBlock.Bush || vegetation === WorldMapBlock.DeadBush || vegetation === WorldMapBlock.SnowBush) return "bush";
+  if (vegetation === WorldMapBlock.Cactus) return "cactus";
+  if (vegetation === WorldMapBlock.Reed || vegetation === WorldMapBlock.Seaweed || vegetation === WorldMapBlock.AquaticPlant || vegetation === WorldMapBlock.SwampGrass) return "reed";
+  if (vegetation === WorldMapBlock.Vine) return "vine";
+  if (vegetation === WorldMapBlock.ShellBed || vegetation === WorldMapBlock.Moss || vegetation === WorldMapBlock.Lichen || vegetation === WorldMapBlock.GlowMycelium) return "groundPatch";
+  if (vegetation === WorldMapBlock.Coral || vegetation === WorldMapBlock.DeadCoral) return "coral";
+  if (vegetation === WorldMapBlock.Mushroom) return "mushroom";
+  if (vegetation === WorldMapBlock.GiantRoot || vegetation === WorldMapBlock.DeadWood) return "large";
+  if (vegetation === WorldMapBlock.Thorn) return "thorn";
+  return "tuft";
+}
+
+function vegetationDecorationChance(category) {
+  switch (category) {
+    case "bush": return 0.1;
+    case "vine": return 0.08;
+    case "cactus": return 0.16;
+    case "reed": return 0.18;
+    case "groundPatch": return 0.16;
+    case "coral": return 0.12;
+    case "mushroom": return 0.34;
+    case "large": return 0.08;
+    case "thorn": return 0.12;
+    default: return 0.14;
+  }
+}
+
 function addSurfacePlants(matrices, x, height, z, transform, THREE) {
   const moisture = random2(Math.floor(x / 6) + 31, Math.floor(z / 6) - 43);
   const flowerRoll = random2(x - 211, z + 587);
@@ -841,7 +895,7 @@ function addBushCluster(matrices, x, height, z, leafType, vegetation, transform,
   const centerX = x + randomOffset(x, z, 51) * 0.8;
   const centerZ = z + randomOffset(x, z, 52) * 0.8;
   const branchType = vegetation === WorldMapBlock.SnowBush ? "pineTrunk" : vegetation === WorldMapBlock.DeadBush ? "deadWood" : "trunkDark";
-  const branchCount = 3 + Math.floor(random2(x + 1649, z - 1657) * 3);
+  const branchCount = 2 + Math.floor(random2(x + 1649, z - 1657) * 2);
 
   for (let i = 0; i < branchCount; i++) {
     const yaw = random2(x + i * 1663, z - i * 1667) * Math.PI * 2;
@@ -863,7 +917,7 @@ function addBushCluster(matrices, x, height, z, leafType, vegetation, transform,
     );
   }
 
-  const leafCount = vegetation === WorldMapBlock.DeadBush ? 2 : 4 + Math.floor(random2(x - 1753, z + 1759) * 2);
+  const leafCount = vegetation === WorldMapBlock.DeadBush ? 1 : 2 + Math.floor(random2(x - 1753, z + 1759) * 2);
   for (let i = 0; i < leafCount; i++) {
     const yaw = (i / leafCount) * Math.PI * 2 + random2(x + i * 1787, z - i * 1789) * 0.42;
     const spread = random2(x - i * 1801, z + i * 1811) * 0.18;
