@@ -1,6 +1,6 @@
 import { blockKey, parseCellKey } from "./keys.js";
 import { canonicalBlockIdAt, canonicalSurfaceHeightAt } from "./canonicalResource.js";
-import { WorldMapBlock } from "./blocks.js";
+import { EMPTY_BLOCK, WorldMapBlock } from "./blocks.js";
 import { minBuildY } from "./config.js";
 
 export function createWorldState() {
@@ -19,7 +19,11 @@ export function createWorldState() {
 
 export function isSolidCell(state, x, y, z) {
   const key = blockKey(x, y, z);
-  return state.solidBlocks.has(key) && !state.removedBlocks.has(key);
+  if (state.removedBlocks.has(key)) return false;
+  if (state.placedBlocks.has(key)) return true;
+  if (state.solidBlocks.has(key)) return true;
+  const block = canonicalBlockIdAt({ x, y, z });
+  return isSolidTerrain(block);
 }
 
 export function surfaceHeight(state, x, z) {
@@ -88,4 +92,11 @@ function columnKey(x, z) {
 
 function isWaterTerrain(block) {
   return block === WorldMapBlock.Water || block === WorldMapBlock.SwampWater || block === WorldMapBlock.ToxicWater || block === WorldMapBlock.Ice;
+}
+
+function isSolidTerrain(block) {
+  return block !== EMPTY_BLOCK &&
+    block !== WorldMapBlock.Water &&
+    block !== WorldMapBlock.SwampWater &&
+    block !== WorldMapBlock.ToxicWater;
 }
