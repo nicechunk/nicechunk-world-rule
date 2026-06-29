@@ -4,6 +4,12 @@
 
 Visual reference for NiceChunk world generation rules.
 
+## Official Links
+
+GitHub: [https://github.com/nicechunk/nicechunk-world-rule](https://github.com/nicechunk/nicechunk-world-rule)
+
+Website: [https://nicechunk.com/world_rule/](https://nicechunk.com/world_rule/)
+
 ## Project Overview
 
 This repository contains the world rule reference page. It turns the deterministic world generation library into an explorable explanation of chunk structure, terrain behavior, seed behavior, and visual world concepts.
