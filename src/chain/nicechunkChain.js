@@ -12,6 +12,7 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  TransactionExpiredBlockheightExceededError,
   TransactionInstruction,
 } from "@solana/web3.js";
 import { EMPTY_BLOCK, WorldMapBlock, renderTypeForBlock } from "../world/blocks.js";
@@ -133,6 +134,9 @@ const sessionMinimumMiningLamports = 8_000_000;
 const sessionAllowedActions = (1 << 1) | (1 << 2);
 const sessionMaxActions = 10_000;
 const miningComputeUnitLimit = 1_400_000;
+const transactionConfirmationPollMs = 500;
+const transactionBlockHeightPollMs = 1_000;
+const transactionConfirmationTimeoutMs = 60_000;
 const treeFellMaxChunkCount = 4;
 const treeFellLeafRadius = 2;
 const supportCollapseMaxOnChainBlocks = 48;
@@ -2991,7 +2995,7 @@ async function signAndSendWalletTransaction(provider, transaction, conn = getNic
   if (typeof provider.signTransaction === "function") {
     const signed = await provider.signTransaction(transaction);
     const signature = await sendRawTransactionWithLogs(conn, signed.serialize(), "wallet");
-    await conn.confirmTransaction({
+    await confirmTransactionByHttpPolling(conn, {
       signature,
       blockhash: transaction.recentBlockhash,
       lastValidBlockHeight: transaction.lastValidBlockHeight,
@@ -3005,7 +3009,7 @@ async function signAndSendWalletTransaction(provider, transaction, conn = getNic
   const result = await provider.signAndSendTransaction(transaction);
   const signature = typeof result === "string" ? result : result?.signature;
   if (!signature) throw new Error("Wallet did not return a transaction signature.");
-  await conn.confirmTransaction({
+  await confirmTransactionByHttpPolling(conn, {
     signature,
     blockhash: transaction.recentBlockhash,
     lastValidBlockHeight: transaction.lastValidBlockHeight,
@@ -3020,7 +3024,7 @@ async function signAndSendKeypairTransaction(signer, transaction, conn = getNice
   transaction.lastValidBlockHeight = lastValidBlockHeight;
   transaction.sign(signer);
   const signature = await sendRawTransactionWithLogs(conn, transaction.serialize(), "keypair");
-  await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  await confirmTransactionByHttpPolling(conn, { signature, blockhash, lastValidBlockHeight }, "confirmed");
   return signature;
 }
 
@@ -3031,6 +3035,81 @@ async function sendRawTransactionWithLogs(conn, serializedTransaction, context) 
     await attachSendTransactionLogs(error, conn, context);
     throw error;
   }
+}
+
+async function confirmTransactionByHttpPolling(conn, strategy, commitment = "confirmed") {
+  const { signature, lastValidBlockHeight } = strategy;
+  const startedAt = Date.now();
+  let nextBlockHeightCheckAt = 0;
+
+  while (true) {
+    const statusResponse = await conn.getSignatureStatuses([signature]);
+    const status = statusResponse?.value?.[0] ?? null;
+    if (status?.err) throw createTransactionStatusError(signature, status.err);
+    if (hasReachedSignatureCommitment(status, commitment)) {
+      return {
+        context: statusResponse.context,
+        value: { err: null },
+      };
+    }
+
+    const now = Date.now();
+    if (Number.isFinite(lastValidBlockHeight) && now >= nextBlockHeightCheckAt) {
+      nextBlockHeightCheckAt = now + transactionBlockHeightPollMs;
+      const blockHeight = await conn.getBlockHeight(commitment).catch(() => null);
+      if (Number.isFinite(blockHeight) && blockHeight > lastValidBlockHeight) {
+        const finalStatusResponse = await conn.getSignatureStatuses([signature], {
+          searchTransactionHistory: true,
+        });
+        const finalStatus = finalStatusResponse?.value?.[0] ?? null;
+        if (finalStatus?.err) throw createTransactionStatusError(signature, finalStatus.err);
+        if (hasReachedSignatureCommitment(finalStatus, commitment)) {
+          return {
+            context: finalStatusResponse.context,
+            value: { err: null },
+          };
+        }
+        throw new TransactionExpiredBlockheightExceededError(signature);
+      }
+    } else if (!Number.isFinite(lastValidBlockHeight) && now - startedAt > transactionConfirmationTimeoutMs) {
+      throw createTransactionConfirmationTimeoutError(signature);
+    }
+
+    await sleep(transactionConfirmationPollMs);
+  }
+}
+
+function hasReachedSignatureCommitment(status, commitment = "confirmed") {
+  if (!status) return false;
+  const confirmationStatus = status.confirmationStatus ?? (status.confirmations === null ? "finalized" : null);
+  if (commitment === "processed" || commitment === "recent") return true;
+  if (commitment === "finalized" || commitment === "max" || commitment === "root") {
+    return confirmationStatus === "finalized";
+  }
+  return (
+    confirmationStatus === "confirmed" ||
+    confirmationStatus === "finalized" ||
+    (confirmationStatus === null && Number.isFinite(status.confirmations) && status.confirmations > 0)
+  );
+}
+
+function createTransactionStatusError(signature, transactionError) {
+  const error = new Error(`Transaction ${signature} failed: ${JSON.stringify(transactionError)}`);
+  error.name = "TransactionStatusError";
+  error.signature = signature;
+  error.transactionError = transactionError;
+  return error;
+}
+
+function createTransactionConfirmationTimeoutError(signature) {
+  const error = new Error(`Transaction ${signature} was not confirmed within ${transactionConfirmationTimeoutMs / 1000} seconds.`);
+  error.name = "TransactionConfirmationTimeoutError";
+  error.signature = signature;
+  return error;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 async function attachSendTransactionLogs(error, conn, context) {
