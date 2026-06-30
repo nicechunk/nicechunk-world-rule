@@ -17,6 +17,7 @@ import {
 import { EMPTY_BLOCK, WorldMapBlock, renderTypeForBlock } from "../world/blocks.js";
 import { canonicalBlockIdAt, isCanonicalMineableBlockId } from "../world/canonicalResource.js";
 import { chunkSize, minBuildY } from "../world/config.js";
+import { resourceDropRules, resourceDropRuleSet } from "../data/resourceDropRules.js";
 import { createNicechunkRpcFetch, getNicechunkRpcUrl, reportRpcError, rpcConfigChangedEventName } from "../rpcConfig.js";
 import { assertNicechunkWalletNetwork, solanaClusterLabel } from "../solanaNetwork.js";
 
@@ -32,6 +33,7 @@ const globalConfigSeed = "global-config";
 const playerSeed = "player";
 const playerSessionSeed = "session";
 const chunkBrokenSeed = "chunk-broken";
+const resourceDropTableSeed = "resource-drops";
 const backpackSeed = "backpack";
 const marketListingSeed = "listing";
 const marketAuthoritySeed = "market-authority";
@@ -46,6 +48,8 @@ const playerProfileLength = 449;
 const chunkBrokenMagic = "NCBK";
 const chunkBrokenHeaderLength = 16;
 const chunkBrokenRecordLength = 3;
+const resourceDropRuleLength = 15;
+const resourceDropTableHeaderLength = 16;
 const backpackMagic = "NCKBPK01";
 const backpackLegacyVersion = 1;
 const backpackVersion = 2;
@@ -128,6 +132,16 @@ const sessionMinimumMiningLamports = 8_000_000;
 const sessionAllowedActions = (1 << 1) | (1 << 2);
 const sessionMaxActions = 10_000;
 const miningComputeUnitLimit = 1_400_000;
+const chunkDeltaCacheTtlMs = 60_000;
+const gameplaySessionStatusCacheTtlMs = 60_000;
+const gameplaySessionReadyCacheTtlMs = 5 * 60_000;
+const resourceDropTableCacheTtlMs = 10 * 60_000;
+const chunkDeltaCache = new Map();
+const initializedChunkBrokenCache = new Set();
+const gameplaySessionStatusCache = new Map();
+const gameplaySessionReadyCache = new Map();
+let resourceDropTableReadyAt = 0;
+let resourceDropTableReadyPromise = null;
 
 const blockIdByRenderType = new Map([
   ["grass", WorldMapBlock.Grass],
@@ -208,7 +222,17 @@ if (typeof window !== "undefined") {
   window.addEventListener(rpcConfigChangedEventName, () => {
     connection = null;
     connectionRpcUrl = "";
+    clearChainReadCaches();
   });
+}
+
+function clearChainReadCaches() {
+  chunkDeltaCache.clear();
+  initializedChunkBrokenCache.clear();
+  gameplaySessionStatusCache.clear();
+  gameplaySessionReadyCache.clear();
+  resourceDropTableReadyAt = 0;
+  resourceDropTableReadyPromise = null;
 }
 
 export function deriveGlobalConfigPda() {
@@ -286,6 +310,13 @@ export function deriveChunkBrokenPda(chunkX, chunkZ) {
   );
 }
 
+export function deriveResourceDropTablePda() {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(resourceDropTableSeed), deriveGlobalConfigPda().toBuffer()],
+    chunkProgramId,
+  );
+}
+
 export function deriveBackpackPda(owner, backpackId) {
   const backpackIdBytes = Buffer.alloc(8);
   backpackIdBytes.writeBigUInt64LE(BigInt(backpackId), 0);
@@ -332,11 +363,12 @@ export async function executeSmeltingOnChain({
   recipeTableId = smeltingDefaultRecipeTableId,
   inputIndexes = [],
   fuelIndexes = [],
+  batchMultiplier = 1,
   backpackAddress = null,
 } = {}) {
   const provider = await connectedWalletProvider({ prompt: true });
   if (!provider) return { submitted: false, reason: "wallet-unavailable" };
-  const normalizedInputIndexes = normalizeBackpackIndexes(inputIndexes).slice(0, 8);
+  const normalizedInputIndexes = normalizeBackpackIndexes(inputIndexes);
   const normalizedFuelIndexes = normalizeBackpackIndexes(fuelIndexes);
   if (!BigInt(recipeId || 0) || !normalizedInputIndexes.length || !normalizedFuelIndexes.length) {
     return { submitted: false, reason: "invalid-smelting-inputs" };
@@ -360,6 +392,7 @@ export async function executeSmeltingOnChain({
     recipeId,
     inputIndexes: normalizedInputIndexes,
     fuelIndexes: normalizedFuelIndexes,
+    batchMultiplier,
   }));
   const signature = await signAndSendWalletTransaction(provider, tx, conn);
   return {
@@ -369,6 +402,7 @@ export async function executeSmeltingOnChain({
     recipeId: BigInt(recipeId).toString(),
     inputIndexes: normalizedInputIndexes,
     fuelIndexes: normalizedFuelIndexes,
+    batchMultiplier,
     recipeTable: recipeTable.toBase58(),
     recipeTableId: BigInt(recipeTableId).toString(),
     programId: smeltingProgramId.toBase58(),
@@ -721,48 +755,97 @@ function marketListingSearchText(listing) {
 
 export async function loadChunkBlockDeltas(chunkX, chunkZ) {
   if (!isNicechunkChainSyncEnabled()) return [];
-  const [chunkBrokenPda] = deriveChunkBrokenPda(chunkX, chunkZ);
-  const chunkBrokenAccount = await getNicechunkConnection().getAccountInfo(chunkBrokenPda, "confirmed");
-  if (!chunkBrokenAccount?.data?.length) return [];
-  return decodeChunkBrokenDeltas(chunkBrokenAccount.data, chunkX, chunkZ);
+  const key = chunkCacheKey(chunkX, chunkZ);
+  const cached = readFreshChunkDeltaCache(key);
+  if (cached) return cached;
+  const deltasByChunk = await loadChunkBlockDeltasBatch([{ chunkX, chunkZ }], { batchSize: 1 });
+  return deltasByChunk.get(key) ?? [];
 }
 
 export async function loadChunkBlockDeltasBatch(chunks, { batchSize = 50 } = {}) {
   if (!isNicechunkChainSyncEnabled() || !Array.isArray(chunks) || !chunks.length) return new Map();
   const results = new Map();
   const uniqueChunks = dedupeChunks(chunks);
+  const pendingReads = [];
+  const chunksToFetch = [];
+  for (const chunk of uniqueChunks) {
+    const key = chunkCacheKey(chunk.chunkX, chunk.chunkZ);
+    const cached = readFreshChunkDeltaCache(key);
+    if (cached) {
+      results.set(key, cached);
+      continue;
+    }
+    const entry = chunkDeltaCache.get(key);
+    if (entry?.promise) {
+      pendingReads.push(entry.promise.then((deltas) => results.set(key, deltas ?? [])));
+      continue;
+    }
+    chunksToFetch.push(chunk);
+  }
+  if (!chunksToFetch.length) {
+    if (pendingReads.length) await Promise.all(pendingReads);
+    return results;
+  }
   const conn = getNicechunkConnection();
 
-  for (let start = 0; start < uniqueChunks.length; start += batchSize) {
-    const batch = uniqueChunks.slice(start, start + batchSize);
+  for (let start = 0; start < chunksToFetch.length; start += batchSize) {
+    const batch = chunksToFetch.slice(start, start + batchSize);
     const accounts = batch.map((chunk) => deriveChunkBrokenPda(chunk.chunkX, chunk.chunkZ)[0]);
+    const batchPromise = conn.getMultipleAccountsInfo(accounts, "confirmed")
+      .then((infos) => {
+        const loadedAt = Date.now();
+        const batchResults = new Map();
+        for (let index = 0; index < batch.length; index += 1) {
+          const chunk = batch[index];
+          const key = chunkCacheKey(chunk.chunkX, chunk.chunkZ);
+          const brokenAccount = infos[index];
+          const exists = Boolean(brokenAccount?.data?.length);
+          const deltas = brokenAccount?.data?.length
+            ? decodeChunkBrokenDeltas(brokenAccount.data, chunk.chunkX, chunk.chunkZ)
+            : [];
+          chunkDeltaCache.set(key, { deltas, exists, loadedAt, promise: null });
+          if (exists) initializedChunkBrokenCache.add(key);
+          batchResults.set(key, deltas);
+        }
+        return batchResults;
+      })
+      .catch((error) => {
+        for (const chunk of batch) chunkDeltaCache.delete(chunkCacheKey(chunk.chunkX, chunk.chunkZ));
+        reportRpcError(error, "chunk-delta-batch");
+        throw error;
+      });
+    for (const chunk of batch) {
+      const key = chunkCacheKey(chunk.chunkX, chunk.chunkZ);
+      chunkDeltaCache.set(key, {
+        deltas: [],
+        loadedAt: 0,
+        promise: batchPromise.then((batchResults) => batchResults.get(key) ?? []),
+      });
+    }
     let infos;
     try {
-      infos = await conn.getMultipleAccountsInfo(accounts, "confirmed");
+      infos = await batchPromise;
     } catch (error) {
-      reportRpcError(error, "chunk-delta-batch");
       throw error;
     }
-    for (let index = 0; index < batch.length; index += 1) {
-      const chunk = batch[index];
-      const chunkKey = `${chunk.chunkX},${chunk.chunkZ}`;
-      const brokenAccount = infos[index];
-      const deltas = brokenAccount?.data?.length
-        ? decodeChunkBrokenDeltas(brokenAccount.data, chunk.chunkX, chunk.chunkZ)
-        : [];
-      results.set(chunkKey, deltas);
-    }
+    for (const [key, deltas] of infos) results.set(key, deltas);
   }
+  if (pendingReads.length) await Promise.all(pendingReads);
   return results;
 }
 
-export async function recordBlockBreakOnChain(block, toolSlot = 0) {
+export async function recordBlockBreakOnChain(block, toolSlot = 0, options = {}) {
   if (!isNicechunkChainSyncEnabled()) {
     return { submitted: false, reason: "chain-sync-disabled" };
   }
   try {
     const provider = await connectedWalletProvider();
     if (!provider) return { submitted: false, reason: "wallet-unavailable" };
+
+    const canonicalBlock = await resolveCanonicalMinedBlock(block);
+    if (!isCanonicalMineableBlockId(canonicalBlock.blockId)) {
+      return { submitted: false, reason: "unmineable-block", blockId: canonicalBlock.blockId };
+    }
 
     if (await isBlockAlreadyBrokenOnChain(block)) {
       return { submitted: false, reason: "already-mined" };
@@ -771,38 +854,35 @@ export async function recordBlockBreakOnChain(block, toolSlot = 0) {
     const session = await getOrCreateGameplaySession(provider);
     const tx = new Transaction();
     const conn = getNicechunkConnection();
-    const equippedBackpack = await loadEquippedBackpackForOwner(provider.publicKey, conn);
+    const equippedBackpack = options?.backpackAddress
+      ? {
+          publicKey: new PublicKey(options.backpackAddress),
+          itemCount: Number(options.backpackItemCount),
+          capacity: Number(options.backpackCapacity),
+        }
+      : await loadEquippedBackpackForOwner(provider.publicKey, conn);
     if (!equippedBackpack?.publicKey) {
       return { submitted: false, reason: "no-backpack" };
     }
-    if (equippedBackpack.itemCount >= equippedBackpack.capacity) {
+    if (
+      Number.isFinite(equippedBackpack.itemCount) &&
+      Number.isFinite(equippedBackpack.capacity) &&
+      equippedBackpack.itemCount >= equippedBackpack.capacity
+    ) {
       return { submitted: false, reason: "backpack-full" };
     }
-    const canonicalBlock = await resolveCanonicalMinedBlock(block);
-    if (!isCanonicalMineableBlockId(canonicalBlock.blockId)) {
-      return { submitted: false, reason: "unmineable-block", blockId: canonicalBlock.blockId };
-    }
-    await ensureChunkBrokenInitialized(
-      conn,
-      session.keypair,
-      blockChunkX(canonicalBlock.x),
-      blockChunkZ(canonicalBlock.z),
-    );
+    await ensureMiningAccountsInitialized(conn, session.keypair, blockChunkX(canonicalBlock.x), blockChunkZ(canonicalBlock.z));
     tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: miningComputeUnitLimit }));
-    tx.add(createMineBlockInstruction({
+    tx.add(createMineBlockWithRewardsInstruction({
       authority: session.keypair.publicKey,
       block,
       owner: provider.publicKey,
-      expectedBlockId: canonicalBlock.blockId,
-    }));
-    tx.add(createAppendMinedResourceInstruction({
-      owner: provider.publicKey,
-      sessionAuthority: session.keypair.publicKey,
       backpack: equippedBackpack.publicKey,
-      block: canonicalBlock,
+      expectedBlockId: canonicalBlock.blockId,
     }));
 
     const signature = await signAndSendKeypairTransaction(session.keypair, tx, conn);
+    invalidateChunkDeltaCache(blockChunkX(canonicalBlock.x), blockChunkZ(canonicalBlock.z));
     return {
       submitted: true,
       signature,
@@ -818,15 +898,115 @@ export async function recordBlockBreakOnChain(block, toolSlot = 0) {
 }
 
 async function ensureChunkBrokenInitialized(conn, sessionKeypair, chunkX, chunkZ) {
+  const key = chunkCacheKey(chunkX, chunkZ);
+  if (initializedChunkBrokenCache.has(key)) return null;
   const [chunkBrokenPda] = deriveChunkBrokenPda(chunkX, chunkZ);
   const account = await conn.getAccountInfo(chunkBrokenPda, "confirmed");
-  if (account?.data?.length) return null;
+  if (account?.data?.length) {
+    initializedChunkBrokenCache.add(key);
+    return null;
+  }
   const tx = new Transaction().add(createInitializeChunkBrokenInstruction({
     authority: sessionKeypair.publicKey,
     chunkX,
     chunkZ,
   }));
-  return signAndSendKeypairTransaction(sessionKeypair, tx, conn);
+  const signature = await signAndSendKeypairTransaction(sessionKeypair, tx, conn);
+  initializedChunkBrokenCache.add(key);
+  invalidateChunkDeltaCache(chunkX, chunkZ);
+  return signature;
+}
+
+async function ensureMiningAccountsInitialized(conn, sessionKeypair, chunkX, chunkZ) {
+  const key = chunkCacheKey(chunkX, chunkZ);
+  const needsChunkCheck = !initializedChunkBrokenCache.has(key);
+  const now = Date.now();
+  const needsDropCheck = !(resourceDropTableReadyAt && now - resourceDropTableReadyAt < resourceDropTableCacheTtlMs);
+  if (!needsChunkCheck && !needsDropCheck) return null;
+  if (resourceDropTableReadyPromise) await resourceDropTableReadyPromise;
+
+  const [chunkBrokenPda] = deriveChunkBrokenPda(chunkX, chunkZ);
+  const [resourceDropTable] = deriveResourceDropTablePda();
+  const pubkeys = [];
+  const labels = [];
+  let chunkExists = !needsChunkCheck;
+  let dropExists = !needsDropCheck;
+  const cachedChunk = chunkDeltaCache.get(key);
+  const hasFreshChunkExistence = Boolean(
+    needsChunkCheck &&
+    cachedChunk &&
+    !cachedChunk.promise &&
+    Date.now() - cachedChunk.loadedAt < chunkDeltaCacheTtlMs,
+  );
+  if (hasFreshChunkExistence) {
+    chunkExists = Boolean(cachedChunk.exists);
+    if (chunkExists) initializedChunkBrokenCache.add(key);
+  } else if (needsChunkCheck) {
+    pubkeys.push(chunkBrokenPda);
+    labels.push("chunk");
+  }
+  if (needsDropCheck) {
+    pubkeys.push(resourceDropTable);
+    labels.push("drops");
+  }
+
+  if (pubkeys.length) {
+    const infos = await conn.getMultipleAccountsInfo(pubkeys, "confirmed");
+    for (let index = 0; index < labels.length; index += 1) {
+      if (labels[index] === "chunk") chunkExists = Boolean(infos[index]?.data?.length);
+      if (labels[index] === "drops") dropExists = Boolean(infos[index]?.data?.length);
+    }
+  }
+
+  if (chunkExists) initializedChunkBrokenCache.add(key);
+  if (dropExists) resourceDropTableReadyAt = Date.now();
+  if (chunkExists && dropExists) return null;
+
+  const tx = new Transaction();
+  if (!chunkExists) {
+    tx.add(createInitializeChunkBrokenInstruction({
+      authority: sessionKeypair.publicKey,
+      chunkX,
+      chunkZ,
+    }));
+  }
+  if (!dropExists) {
+    tx.add(createInitializeResourceDropTableInstruction({
+      authority: sessionKeypair.publicKey,
+      rules: resourceDropRules,
+    }));
+  }
+  const signature = await signAndSendKeypairTransaction(sessionKeypair, tx, conn);
+  if (!chunkExists) {
+    initializedChunkBrokenCache.add(key);
+    invalidateChunkDeltaCache(chunkX, chunkZ);
+  }
+  if (!dropExists) resourceDropTableReadyAt = Date.now();
+  return signature;
+}
+
+async function ensureResourceDropTableInitialized(conn, sessionKeypair) {
+  const now = Date.now();
+  if (resourceDropTableReadyAt && now - resourceDropTableReadyAt < resourceDropTableCacheTtlMs) return null;
+  if (resourceDropTableReadyPromise) return resourceDropTableReadyPromise;
+  const [resourceDropTable] = deriveResourceDropTablePda();
+  resourceDropTableReadyPromise = (async () => {
+    const account = await conn.getAccountInfo(resourceDropTable, "confirmed");
+    if (account?.data?.length) {
+      resourceDropTableReadyAt = Date.now();
+      return null;
+    }
+    const tx = new Transaction().add(createInitializeResourceDropTableInstruction({
+      authority: sessionKeypair.publicKey,
+      rules: resourceDropRules,
+    }));
+    const signature = await signAndSendKeypairTransaction(sessionKeypair, tx, conn);
+    resourceDropTableReadyAt = Date.now();
+    return signature;
+  })().finally(() => {
+    resourceDropTableReadyPromise = null;
+  });
+  return resourceDropTableReadyPromise;
 }
 
 export async function purchaseDefaultBackpack() {
@@ -991,7 +1171,7 @@ export function acknowledgeGameplaySessionFunding(owner = null) {
   if (hasLocalStorage()) localStorage.setItem(sessionFundingAcknowledgedKey(owner), "1");
 }
 
-export async function getGameplaySessionStatus() {
+export async function getGameplaySessionStatus({ force = false } = {}) {
   const provider = await connectedWalletProvider();
   if (!provider) {
     return {
@@ -1006,12 +1186,17 @@ export async function getGameplaySessionStatus() {
   }
 
   const owner = provider.publicKey;
+  const ownerKey = owner.toBase58();
+  const cached = gameplaySessionStatusCache.get(ownerKey);
+  if (!force && cached && Date.now() - cached.loadedAt < gameplaySessionStatusCacheTtlMs) {
+    return { ...cached.status };
+  }
   const stored = loadStoredGameplaySession(owner);
   const configuredFundingLamports = getConfiguredGameplaySessionFundingLamports(owner);
   if (!stored) {
-    return {
+    const status = {
       walletAvailable: true,
-      owner: owner.toBase58(),
+      owner: ownerKey,
       acknowledged: hasAcknowledgedGameplaySessionFunding(owner),
       configuredFundingLamports,
       minimumFundingLamports: minimumSessionFundingLamports,
@@ -1019,6 +1204,8 @@ export async function getGameplaySessionStatus() {
       publicKey: null,
       expiresAt: null,
     };
+    gameplaySessionStatusCache.set(ownerKey, { status, loadedAt: Date.now() });
+    return status;
   }
 
   let balanceLamports = null;
@@ -1029,9 +1216,9 @@ export async function getGameplaySessionStatus() {
     throw error;
   }
 
-  return {
+  const status = {
     walletAvailable: true,
-    owner: owner.toBase58(),
+    owner: ownerKey,
     acknowledged: hasAcknowledgedGameplaySessionFunding(owner),
     configuredFundingLamports,
     minimumFundingLamports: minimumSessionFundingLamports,
@@ -1040,6 +1227,8 @@ export async function getGameplaySessionStatus() {
     publicKey: stored.keypair.publicKey.toBase58(),
     expiresAt: stored.expiresAt,
   };
+  gameplaySessionStatusCache.set(ownerKey, { status, loadedAt: Date.now() });
+  return status;
 }
 
 export async function ensureGameplaySessionFunded() {
@@ -1048,6 +1237,17 @@ export async function ensureGameplaySessionFunded() {
     if (!provider) return { funded: false, reason: "wallet-unavailable" };
     const session = await getOrCreateGameplaySession(provider);
     const balanceLamports = await getNicechunkConnection().getBalance(session.keypair.publicKey, "confirmed");
+    updateGameplaySessionStatusCache(provider.publicKey, {
+      walletAvailable: true,
+      owner: provider.publicKey.toBase58(),
+      acknowledged: hasAcknowledgedGameplaySessionFunding(provider.publicKey),
+      configuredFundingLamports: getConfiguredGameplaySessionFundingLamports(provider.publicKey),
+      minimumFundingLamports: minimumSessionFundingLamports,
+      balanceLamports,
+      balanceSol: balanceLamports / lamportsPerSol,
+      publicKey: session.keypair.publicKey.toBase58(),
+      expiresAt: session.expiresAt,
+    });
     return {
       funded: true,
       balanceLamports,
@@ -1079,6 +1279,53 @@ function dedupeChunks(chunks) {
     unique.push({ chunkX, chunkZ });
   }
   return unique;
+}
+
+function chunkCacheKey(chunkX, chunkZ) {
+  return `${chunkX},${chunkZ}`;
+}
+
+function readFreshChunkDeltaCache(key) {
+  const entry = chunkDeltaCache.get(key);
+  if (!entry || entry.promise) return null;
+  return Date.now() - entry.loadedAt < chunkDeltaCacheTtlMs ? entry.deltas : null;
+}
+
+function invalidateChunkDeltaCache(chunkX, chunkZ) {
+  chunkDeltaCache.delete(chunkCacheKey(chunkX, chunkZ));
+}
+
+function updateGameplaySessionStatusCache(owner, status) {
+  const ownerKey = owner?.toBase58?.() ?? String(owner ?? "");
+  if (!ownerKey || !status) return;
+  gameplaySessionStatusCache.set(ownerKey, { status, loadedAt: Date.now() });
+}
+
+function accountLamports(account) {
+  const value = Number(account?.lamports);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function gameplaySessionReadyKey(owner, sessionAuthority) {
+  const ownerKey = owner?.toBase58?.() ?? String(owner ?? "");
+  const sessionKey = sessionAuthority?.toBase58?.() ?? String(sessionAuthority ?? "");
+  return ownerKey && sessionKey ? `${ownerKey}:${sessionKey}` : "";
+}
+
+function markGameplaySessionReady(owner, sessionAuthority, balanceLamports = null) {
+  const key = gameplaySessionReadyKey(owner, sessionAuthority);
+  if (!key) return;
+  gameplaySessionReadyCache.set(key, {
+    loadedAt: Date.now(),
+    balanceLamports: Number.isFinite(balanceLamports) ? Math.floor(balanceLamports) : null,
+  });
+}
+
+function isGameplaySessionReadyCached(owner, sessionAuthority) {
+  const key = gameplaySessionReadyKey(owner, sessionAuthority);
+  if (!key) return false;
+  const cached = gameplaySessionReadyCache.get(key);
+  return Boolean(cached && Date.now() - cached.loadedAt < gameplaySessionReadyCacheTtlMs);
 }
 
 export async function recordBlockPlacementOnChain(_target, _renderType, _toolSlot = 0) {
@@ -1233,6 +1480,7 @@ function decodeBackpackSlot(data, offset) {
     itemCode: data.readUInt16LE(offset + 18),
     itemId: data.readBigUInt64LE(offset + 20).toString(),
     itemPda,
+    volumeMm3: data.readUInt32LE(offset + 60),
   };
 }
 
@@ -1333,18 +1581,15 @@ function decodeMarketAsset(data) {
 async function isBlockAlreadyBrokenOnChain(block) {
   const chunkX = blockChunkX(block.x);
   const chunkZ = blockChunkZ(block.z);
-  const [chunkBrokenPda] = deriveChunkBrokenPda(chunkX, chunkZ);
-  let account;
   try {
-    account = await getNicechunkConnection().getAccountInfo(chunkBrokenPda, "confirmed");
+    const deltas = await loadChunkBlockDeltas(chunkX, chunkZ);
+    return deltas.some((delta) =>
+      delta.x === block.x && delta.y === block.y && delta.z === block.z
+    );
   } catch (error) {
     reportRpcError(error, "already-broken-check");
     throw error;
   }
-  if (!account?.data?.length) return false;
-  return decodeChunkBrokenDeltas(account.data, chunkX, chunkZ).some((delta) =>
-    delta.x === block.x && delta.y === block.y && delta.z === block.z
-  );
 }
 
 function decodeGlobalConfig(data) {
@@ -1498,6 +1743,38 @@ function createMineBlockInstruction({ authority, block, owner, expectedBlockId }
   });
 }
 
+function createMineBlockWithRewardsInstruction({ authority, block, owner, backpack, expectedBlockId }) {
+  if (!owner) throw new Error("owner is required for canonical mining");
+  if (!backpack) throw new Error("backpack is required for reward mining");
+  if (!Number.isInteger(expectedBlockId)) throw new Error("expectedBlockId is required for canonical mining");
+  const [chunkBrokenPda] = deriveChunkBrokenPda(blockChunkX(block.x), blockChunkZ(block.z));
+  const [resourceDropTable] = deriveResourceDropTablePda();
+  const [playerProfile] = derivePlayerProfilePda(owner);
+  const [playerSession] = derivePlayerSessionPda(owner, authority);
+  const data = Buffer.alloc(13);
+  data.writeUInt8(8, 0);
+  data.writeInt32LE(block.x, 1);
+  data.writeInt16LE(block.y, 5);
+  data.writeInt32LE(block.z, 7);
+  data.writeUInt16LE(expectedBlockId, 11);
+
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: playerProfile, isSigner: false, isWritable: false },
+      { pubkey: playerSession, isSigner: false, isWritable: false },
+      { pubkey: chunkBrokenPda, isSigner: false, isWritable: true },
+      { pubkey: deriveGlobalConfigPda(), isSigner: false, isWritable: false },
+      { pubkey: resourceDropTable, isSigner: false, isWritable: false },
+      { pubkey: backpackProgramId, isSigner: false, isWritable: false },
+      { pubkey: backpack, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
 function createInitializeChunkBrokenInstruction({ authority, chunkX, chunkZ }) {
   const [chunkBrokenPda] = deriveChunkBrokenPda(chunkX, chunkZ);
   const data = Buffer.alloc(9);
@@ -1510,6 +1787,39 @@ function createInitializeChunkBrokenInstruction({ authority, chunkX, chunkZ }) {
     keys: [
       { pubkey: authority, isSigner: true, isWritable: true },
       { pubkey: chunkBrokenPda, isSigner: false, isWritable: true },
+      { pubkey: deriveGlobalConfigPda(), isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
+function createInitializeResourceDropTableInstruction({ authority, rules = resourceDropRules }) {
+  const [resourceDropTable] = deriveResourceDropTablePda();
+  const normalizedRules = Array.isArray(rules) ? rules : [];
+  if (!normalizedRules.length || normalizedRules.length > 64) {
+    throw new Error(`Invalid ${resourceDropRuleSet} rule count: ${normalizedRules.length}`);
+  }
+  const data = Buffer.alloc(2 + normalizedRules.length * resourceDropRuleLength);
+  data.writeUInt8(7, 0);
+  data.writeUInt8(normalizedRules.length, 1);
+  normalizedRules.forEach((rule, index) => {
+    const offset = 2 + index * resourceDropRuleLength;
+    data.writeUInt16LE(rule.sourceBlockId, offset);
+    data.writeUInt16LE(rule.dropBlockId, offset + 2);
+    data.writeUInt16LE(rule.chanceBps, offset + 4);
+    data.writeInt16LE(rule.minAltitude, offset + 6);
+    data.writeInt16LE(rule.maxAltitude, offset + 8);
+    data.writeInt16LE(rule.minDepth, offset + 10);
+    data.writeInt16LE(rule.maxDepth, offset + 12);
+    data.writeUInt8(rule.salt, offset + 14);
+  });
+
+  return new TransactionInstruction({
+    programId: chunkProgramId,
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: resourceDropTable, isSigner: false, isWritable: true },
       { pubkey: deriveGlobalConfigPda(), isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -1654,17 +1964,20 @@ function createExecuteSmeltingInstruction({
   recipeId,
   inputIndexes = [],
   fuelIndexes = [],
+  batchMultiplier = 1,
 }) {
   const [smeltingAuthority] = deriveSmeltingAuthorityPda();
-  const inputs = normalizeBackpackIndexes(inputIndexes).slice(0, 8);
+  const inputs = normalizeBackpackIndexes(inputIndexes);
   const fuels = normalizeBackpackIndexes(fuelIndexes);
-  const data = Buffer.alloc(11 + inputs.length + fuels.length);
+  const multiplier = Math.max(1, Math.min(0xffff, Math.floor(Number(batchMultiplier) || 1)));
+  const data = Buffer.alloc(13 + inputs.length + fuels.length);
   data.writeUInt8(2, 0);
   data.writeBigUInt64LE(BigInt(recipeId), 1);
   data.writeUInt8(inputs.length, 9);
   data.writeUInt8(fuels.length, 10);
-  inputs.forEach((index, offset) => data.writeUInt8(index, 11 + offset));
-  fuels.forEach((index, offset) => data.writeUInt8(index, 11 + inputs.length + offset));
+  data.writeUInt16LE(multiplier, 11);
+  inputs.forEach((index, offset) => data.writeUInt8(index, 13 + offset));
+  fuels.forEach((index, offset) => data.writeUInt8(index, 13 + inputs.length + offset));
   return new TransactionInstruction({
     programId: smeltingProgramId,
     keys: [
@@ -1870,12 +2183,30 @@ async function getOrCreateGameplaySession(provider) {
   const conn = getNicechunkConnection();
   if (stored && stored.expiresAt > nowSeconds + sessionRefreshSkewSeconds) {
     const [playerSession] = derivePlayerSessionPda(owner, stored.keypair.publicKey);
-    const [account, sessionBalance] = await Promise.all([
-      conn.getAccountInfo(playerSession, "confirmed"),
-      conn.getBalance(stored.keypair.publicKey, "confirmed"),
-    ]);
+    if (isGameplaySessionReadyCached(owner, stored.keypair.publicKey)) return stored;
+    const [account, sessionAccount] = await conn.getMultipleAccountsInfo(
+      [playerSession, stored.keypair.publicKey],
+      "confirmed",
+    );
+    const sessionBalance = accountLamports(sessionAccount);
     if (account?.data?.length) {
       await fundGameplaySessionIfNeeded(provider, stored.keypair.publicKey, sessionBalance, conn);
+      const configuredFundingLamports = getConfiguredGameplaySessionFundingLamports(owner);
+      const effectiveBalance = sessionBalance < minimumSessionFundingLamports
+        ? Math.max(sessionBalance, configuredFundingLamports)
+        : sessionBalance;
+      updateGameplaySessionStatusCache(owner, {
+        walletAvailable: true,
+        owner: owner.toBase58(),
+        acknowledged: hasAcknowledgedGameplaySessionFunding(owner),
+        configuredFundingLamports,
+        minimumFundingLamports: minimumSessionFundingLamports,
+        balanceLamports: effectiveBalance,
+        balanceSol: effectiveBalance / lamportsPerSol,
+        publicKey: stored.keypair.publicKey.toBase58(),
+        expiresAt: stored.expiresAt,
+      });
+      markGameplaySessionReady(owner, stored.keypair.publicKey, effectiveBalance);
       return stored;
     }
   }
@@ -1885,10 +2216,11 @@ async function getOrCreateGameplaySession(provider) {
   const [playerProfile] = derivePlayerProfilePda(owner);
   const [playerSession] = derivePlayerSessionPda(owner, keypair.publicKey);
   const tx = new Transaction();
-  const [profileAccount, sessionBalance] = await Promise.all([
-    conn.getAccountInfo(playerProfile, "confirmed"),
-    conn.getBalance(keypair.publicKey, "confirmed"),
-  ]);
+  const [profileAccount, sessionAccount] = await conn.getMultipleAccountsInfo(
+    [playerProfile, keypair.publicKey],
+    "confirmed",
+  );
+  const sessionBalance = accountLamports(sessionAccount);
 
   if (!profileAccount?.data?.length) {
     tx.add(createInitializePlayerInstruction(owner, playerProfile));
@@ -1914,6 +2246,18 @@ async function getOrCreateGameplaySession(provider) {
   await signAndSendWalletTransaction(provider, tx, conn, [keypair]);
   const session = { keypair, expiresAt };
   storeGameplaySession(owner, session);
+  markGameplaySessionReady(owner, keypair.publicKey, targetLamports);
+  updateGameplaySessionStatusCache(owner, {
+    walletAvailable: true,
+    owner: owner.toBase58(),
+    acknowledged: hasAcknowledgedGameplaySessionFunding(owner),
+    configuredFundingLamports: getConfiguredGameplaySessionFundingLamports(owner),
+    minimumFundingLamports: minimumSessionFundingLamports,
+    balanceLamports: targetLamports,
+    balanceSol: targetLamports / lamportsPerSol,
+    publicKey: keypair.publicKey.toBase58(),
+    expiresAt,
+  });
   return session;
 }
 
@@ -1933,13 +2277,31 @@ async function fundGameplaySessionIfNeeded(provider, sessionAuthority, sessionBa
 }
 
 async function loadEquippedBackpackForOwner(owner, conn = getNicechunkConnection()) {
+  const cachedRecord = loadEquippedBackpackRecord(owner);
+  if (cachedRecord?.backpack) {
+    const cachedBackpack = await loadBackpackAccountForOwner(cachedRecord.backpack, owner, conn).catch(() => null);
+    if (cachedBackpack) return cachedBackpack;
+    clearEquippedBackpackRecord(owner);
+  }
+
   const [playerProfile] = derivePlayerProfilePda(owner);
   const playerAccount = await conn.getAccountInfo(playerProfile, "confirmed");
   if (!playerAccount?.data?.length) return null;
   const profile = decodePlayerProfile(playerAccount.data);
   if (profile.owner !== owner.toBase58()) return null;
   if (!profile.equippedBackpack || profile.equippedBackpack === PublicKey.default.toBase58()) return null;
-  const publicKey = new PublicKey(profile.equippedBackpack);
+  const backpack = await loadBackpackAccountForOwner(profile.equippedBackpack, owner, conn);
+  storeEquippedBackpackRecord(owner, {
+    backpack: backpack.publicKey.toBase58(),
+    backpackId: backpack.backpackId ?? "0",
+    owner: owner.toBase58(),
+    equippedAt: Date.now(),
+  });
+  return backpack;
+}
+
+async function loadBackpackAccountForOwner(backpackAddress, owner, conn = getNicechunkConnection()) {
+  const publicKey = new PublicKey(backpackAddress);
   const account = await conn.getAccountInfo(publicKey, "confirmed");
   if (!account?.data?.length) return null;
   if (!isCurrentBackpackAccountData(account.data)) return null;
