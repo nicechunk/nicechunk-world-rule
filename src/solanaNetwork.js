@@ -1,5 +1,4 @@
 const defaultRequiredCluster = "devnet";
-const mainnetIndexUrl = "/mainnet.json";
 
 let requiredClusterPromise = null;
 let cachedRequiredCluster = defaultRequiredCluster;
@@ -10,17 +9,9 @@ export function nicechunkRequiredSolanaClusterSync() {
 
 export async function getNicechunkRequiredSolanaCluster() {
   if (!requiredClusterPromise) {
-    requiredClusterPromise = fetch(mainnetIndexUrl, { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((index) => {
-        cachedRequiredCluster = normalizeSolanaCluster(index?.chain?.cluster) || defaultRequiredCluster;
-        return cachedRequiredCluster;
-      })
-      .catch(() => {
-        cachedRequiredCluster = defaultRequiredCluster;
-        return cachedRequiredCluster;
-      });
+    requiredClusterPromise = Promise.resolve(defaultRequiredCluster);
   }
+  cachedRequiredCluster = await requiredClusterPromise;
   return requiredClusterPromise;
 }
 

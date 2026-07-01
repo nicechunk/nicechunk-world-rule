@@ -1,6 +1,6 @@
 import { WorldMapBlock, renderTypeForBlock } from "../world/blocks.js";
 
-export const resourceDropRuleSet = "nicechunk-resource-drops-v1";
+export const resourceDropRuleSet = "nicechunk-resource-drops-v2";
 
 export const resourceDropSizeProfiles = {
   lava: sizeProfile([0.1, 0.08, 0.1], [0.38, 0.24, 0.38]),
@@ -74,6 +74,8 @@ function rule(sourceKey, dropKey, chanceBps, minAltitude, maxAltitude, minDepth,
     salt,
     minDimensionsM: size?.minDimensionsM ?? null,
     maxDimensionsM: size?.maxDimensionsM ?? null,
+    minVolumeMm3: dimensionsVolumeMm3(size?.minDimensionsM),
+    maxVolumeMm3: dimensionsVolumeMm3(size?.maxDimensionsM),
   };
 }
 
@@ -90,6 +92,12 @@ function dimensionsFromArray(values) {
     height: values[1],
     depth: values[2],
   };
+}
+
+function dimensionsVolumeMm3(dimensions) {
+  if (!dimensions) return 1;
+  const volumeMm3 = Math.round(dimensions.width * dimensions.height * dimensions.depth * 1_000_000_000);
+  return Math.max(1, Math.min(0xffffffff, volumeMm3));
 }
 
 export function blockIdByKey(key) {
